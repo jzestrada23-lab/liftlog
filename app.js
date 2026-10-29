@@ -19,15 +19,44 @@
     var sessions = D.seedSessions();
     var learned = E.seedLearn(sessions, { k: {}, ctx: {}, d2: {}, unavail: {} });
     return {
-      v: 1,
-      settings: { g: 0.005, timeCap: 60, garageBench: true, muscleCfg: clone(D.MUSCLE_CFG) },
+      v: 2,
+      settings: { g: 0.005, timeCap: 60, garageBench: true, restTimer: true, restSound: true, muscleCfg: clone(D.MUSCLE_CFG) },
       sessions: sessions, custom: [], learned: learned, current: null
     };
   }
+  function migrate(s) {
+    if (s.v >= 2) return s;
+    var d = newState();
+    s.settings = s.settings || {};
+    s.settings.muscleCfg = clone(d.settings.muscleCfg);
+    (s.custom || []).forEach(function (c) { if (D.OLD_MUSCLE[c.muscle]) c.muscle = D.subFor(c.muscle, c.name); });
+    var byId = {};
+    D.LIB.concat(s.custom || []).forEach(function (e) { byId[e.id] = e; });
+    var remap = function (e) {
+      if (byId[e.exId]) e.muscle = byId[e.exId].muscle;
+      else if (D.OLD_MUSCLE[e.muscle]) e.muscle = D.subFor(e.muscle, e.name);
+    };
+    (s.sessions || []).forEach(function (x) { (x.exercises || []).forEach(remap); });
+    if (s.current && s.current.blocks) s.current.blocks.forEach(function (b) { b.exercises.forEach(remap); });
+    s.sessions = s.sessions || [];
+    if (!s.sessions.some(function (x) { return x.id === 'backfill-straight-arm'; })) {
+      s.sessions.push({
+        id: 'backfill-straight-arm', seed: true, type: 'Extra', date: '2026-10-29T10:55:00', finished: true, loc: 'gym', fed: 'fed', bucket: 'midday',
+        exercises: [{ exId: 'straight_arm', muscle: 'lats', note: '', sets: [
+          { w: 72.5, r: 8, rpe: null, flag: false, done: true },
+          { w: 72.5, r: 4, rpe: null, flag: false, done: true },
+          { w: 65, r: 3, rpe: null, flag: false, done: true }] }]
+      });
+    }
+    s.v = 2;
+    return s;
+  }
   function fix(s) {
+    s = migrate(s);
     var d = newState();
     s.settings = Object.assign({}, d.settings, s.settings || {});
     s.settings.muscleCfg = Object.assign({}, d.settings.muscleCfg, s.settings.muscleCfg || {});
+    Object.keys(s.settings.muscleCfg).forEach(function (k) { if (!d.settings.muscleCfg[k]) delete s.settings.muscleCfg[k]; });
     s.sessions = s.sessions || d.sessions;
     s.custom = s.custom || [];
     s.learned = Object.assign({ k: {}, ctx: {}, d2: {}, unavail: {} }, s.learned || {});
@@ -150,7 +179,8 @@
     return E.planSession({
       template: D.SESSIONS[st.type], lib: lib(), location: st.loc, settings: S.settings,
       muscleCfg: S.settings.muscleCfg, weekDone: weekDoneNow(false), again: st.again,
-      learned: S.learned, now: new Date(), timeCap: S.settings.timeCap
+      learned: S.learned, now: new Date(), timeCap: S.settings.timeCap,
+      hasHist: function (id) { return histOf(id).length > 0; }
     });
   }
 
@@ -177,6 +207,7 @@
     var s = S.current;
     s.finishedAt = new Date().toISOString();
     s.finished = true;
+    stopRest();
     var order = {};
     s.blockOrder.forEach(function (id, i) { order[id] = i + 1; });
     var exs = [];
@@ -190,6 +221,106 @@
     S.current = null;
     save();
     return s.id;
+  }
+
+  var rest = null, restTick = null, audio = null, wake = null, $rest = null;
+
+  function unlockAudio() {
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      if (!audio) audio = new AC();
+      if (audio.state === 'suspended') audio.resume();
+    } catch (e) { }
+  }
+  function beep() {
+    try {
+      if (!audio) return;
+      var t0 = audio.currentTime + 0.02;
+      [0, 0.28, 0.56].forEach(function (off, i) {
+        var o = audio.createOscillator(), g = audio.createGain();
+        o.type = 'sine';
+        o.frequency.value = i === 2 ? 1175 : 880;
+        g.gain.setValueAtTime(0.0001, t0 + off);
+        g.gain.exponentialRampToValueAtTime(0.5, t0 + off + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + off + 0.2);
+        o.connect(g); g.connect(audio.destination);
+        o.start(t0 + off); o.stop(t0 + off + 0.22);
+      });
+    } catch (e) { }
+  }
+  function keepAwake(on) {
+    try {
+      if (!navigator.wakeLock) return;
+      if (on && !wake) {
+        navigator.wakeLock.request('screen').then(function (l) {
+          wake = l;
+          l.addEventListener('release', function () { wake = null; });
+        }, function () { });
+      } else if (!on && wake) { wake.release(); wake = null; }
+    } catch (e) { }
+  }
+  function restEl() {
+    if (!$rest) {
+      $rest = document.createElement('div');
+      $rest.className = 'rest';
+      $rest.hidden = true;
+      $rest.innerHTML = '<div class="rest-fill"></div><div class="rest-row"><div><div class="rest-name"></div><div class="rest-time num"></div></div>' +
+        '<div class="rest-btns"><button data-act="rest-sub" aria-label="15 seconds less">−15</button><button data-act="rest-add" aria-label="15 seconds more">+15</button><button data-act="rest-skip">Skip</button></div></div>';
+      document.body.appendChild($rest);
+    }
+    return $rest;
+  }
+  function startRest(ex, setRef) {
+    if (!S.settings.restTimer || !S.current) return;
+    unlockAudio();
+    keepAwake(true);
+    var sec = E.restSeconds(ex.exId, ex.plan && ex.plan.kind, S.sessions);
+    rest = { end: Date.now() + sec * 1000, total: sec, name: ex.name, fired: false, fired2: false, setRef: setRef || null };
+    if (setRef) setRef.rp = sec;
+    document.body.classList.add('has-rest');
+    var el = restEl();
+    el.hidden = false;
+    el.classList.remove('done');
+    el.querySelector('.rest-name').textContent = 'Rest · ' + ex.name.replace(/\s*\(.*\)/, '');
+    clearInterval(restTick);
+    restTick = setInterval(tickRest, 250);
+    tickRest();
+  }
+  function tickRest() {
+    if (!rest) return;
+    var el = restEl();
+    var left = Math.ceil((rest.end - Date.now()) / 1000);
+    var time = el.querySelector('.rest-time');
+    if (left > 0) {
+      time.textContent = Math.floor(left / 60) + ':' + (left % 60 < 10 ? '0' : '') + (left % 60);
+      el.classList.remove('done', 'over');
+      el.querySelector('.rest-fill').style.width = Math.max(0, Math.min(100, 100 * (1 - left / rest.total))) + '%';
+    } else {
+      var over = -left;
+      time.textContent = '+' + Math.floor(over / 60) + ':' + (over % 60 < 10 ? '0' : '') + (over % 60);
+      el.classList.add('done');
+      el.classList.toggle('over', over >= 30);
+      el.querySelector('.rest-fill').style.width = '100%';
+      if (!rest.fired) {
+        rest.fired = true;
+        if (S.settings.restSound) beep();
+        try { if (navigator.vibrate) navigator.vibrate([200, 100, 200]); } catch (e) { }
+      }
+      if (over >= 60 && !rest.fired2) {
+        rest.fired2 = true;
+        if (S.settings.restSound) beep();
+      }
+      if (over > 1800) stopRest();
+    }
+  }
+  function stopRest() {
+    rest = null;
+    clearInterval(restTick);
+    restTick = null;
+    if ($rest) $rest.hidden = true;
+    document.body.classList.remove('has-rest');
+    keepAwake(false);
   }
 
   function targetText(ex, k) {
@@ -255,6 +386,7 @@
   }
 
   function weekBars(done) {
+    var ind = E.weekIndirect(S.sessions.concat(S.current ? [{ date: S.current.date, exercises: flat(S.current) }] : []), new Date(), libById());
     var out = '<div class="bars">';
     Object.keys(D.MUSCLE_CFG).forEach(function (m) {
       var cfg = S.settings.muscleCfg[m];
@@ -262,9 +394,9 @@
       var pct = Math.min(100, Math.round(d / cfg.target * 100));
       out += '<div class="bar' + (d >= cfg.target ? ' full' : '') + '"><span>' + esc(D.MUSCLE_LABEL[m]) + '</span>' +
         '<span class="track"><span class="fill" style="display:block;width:' + pct + '%"></span></span>' +
-        '<span class="n">' + d + '/' + cfg.target + '</span></div>';
+        '<span class="n">' + d + '/' + cfg.target + (ind[m] ? '<span class="ind"> +' + fmt(ind[m]) + '</span>' : '') + '</span></div>';
     });
-    return out + '</div>';
+    return out + '</div>' + '<p class="mute small" style="margin-top:8px">The small plus number is indirect work from other exercises. It does not count toward the target.</p>';
   }
 
   function exSeries(id) {
@@ -341,6 +473,31 @@
     return facts;
   }
 
+  function restCard() {
+    var st = E.restStats(S.sessions);
+    var h = '<div class="section"><h2>Rest and output</h2>';
+    if (st.pairs < 6) return h + '<p class="mute small">Appears after about 6 timed rests. Log sets right after you finish them.</p></div>';
+    h += '<p class="mute small" style="margin-bottom:8px">How much strength you kept on the next set, by rest length. Higher is better. Based on ' + st.pairs + ' rests.</p><div class="facts">';
+    st.buckets.forEach(function (b) {
+      h += '<li><span>' + esc(b.label) + '</span> <b style="float:right">' + (b.n >= 4 ? Math.round(b.ret * 100) + '% · ' + b.n + ' sets' : b.n + ' sets, need 4') + '</b></li>';
+    });
+    h += '</div>';
+    var ad = st.adherence;
+    if (ad.n >= 6) {
+      h += '<p class="mute small" style="margin:14px 0 8px">Against your timer: ' + ad.overN + ' of ' + ad.n + ' rests ran 30 seconds or more over' + (ad.overN ? ' (about ' + Math.round(ad.avgOver) + ' seconds)' : '') + '.</p>';
+      if (ad.overN >= 4 && ad.onN >= 4) h += '<div class="facts"><li><span>On time</span> <b style="float:right">' + Math.round(ad.onRet * 100) + '% kept</b></li><li><span>Over</span> <b style="float:right">' + Math.round(ad.overRet * 100) + '% kept</b></li></div>';
+    }
+    if (st.sessions.length) {
+      h += '<p class="mute small" style="margin:14px 0 8px">Per session: average rest and load moved per minute.</p><div class="facts">';
+      st.sessions.slice(-6).forEach(function (x) {
+        var m = Math.round(x.avgRest / 15) * 15;
+        h += '<li><span>' + esc(x.type) + ' · ' + esc(fmtDate(x.date)) + '</span> <b style="float:right">' + Math.floor(m / 60) + ':' + (m % 60 < 10 ? '0' : '') + (m % 60) + ' rest · ' + Math.round(x.perMin) + ' lb/min</b></li>';
+      });
+      h += '</div>';
+    }
+    return h + '</div>';
+  }
+
   function vHome() {
     var done = weekDoneNow(true);
     var byId = libById();
@@ -363,6 +520,7 @@
     }
     h += '<div class="section"><h2>Notes from your data</h2><ul class="facts">' + coachFacts().map(function (f) { return '<li>' + f + '</li>'; }).join('') + '</ul></div>';
     h += '<div class="section"><h2>Sets this week</h2>' + weekBars(done) + '</div>';
+    h += restCard();
     h += '<div class="section"><h2>Estimated max</h2><div class="chart">';
     if (ui.chartEx) {
       h += '<select data-act="chart-ex" aria-label="Exercise">' + ids.map(function (id) { return '<option value="' + id + '"' + (id === ui.chartEx ? ' selected' : '') + '>' + esc(byId[id].name) + '</option>'; }).join('') + '</select>' + chartSvg(exSeries(ui.chartEx));
@@ -483,6 +641,8 @@
     h += '<div class="section list">';
     b.exercises.forEach(function (e, ei) { h += exCard(bi, ei); });
     h += '</div>';
+    h += blockCoverage(b);
+    h += '<div class="row-btns"><button class="btn secondary slim" data-act="add-ex" data-b="' + bi + '">Add exercise</button></div>';
     if (blockDone(b)) h += '<div class="row-btns"><button class="btn" data-go="#/session">Block complete. Back to session</button></div>';
     return h;
   }
@@ -518,6 +678,7 @@
     var next = ex.sets[k + 1];
     if (next && !next.done && (next.w === '' || next.w == null)) next.w = w;
     save();
+    startRest(ex, s);
     if (exDone(ex)) {
       var b = S.current.blocks[bi];
       var nx = b.exercises.findIndex(function (e) { return !exDone(e); });
@@ -527,11 +688,58 @@
     } else rerenderEx(bi, ei);
   }
 
+  function blockSubs(b) {
+    var tpl = D.SESSIONS[S.current.type];
+    var blk = tpl && tpl.blocks.filter(function (x) { return x.id === b.id; })[0];
+    var subs = blk ? blk.muscles.slice() : [];
+    b.exercises.forEach(function (e) { if (subs.indexOf(e.muscle) < 0) subs.push(e.muscle); });
+    return subs;
+  }
+  function blockCoverage(b) {
+    var done = weekDoneNow(true);
+    var line = blockSubs(b).map(function (m) {
+      var cfg = S.settings.muscleCfg[m];
+      return esc(D.MUSCLE_LABEL[m] || m) + ' ' + (done[m] || 0) + (cfg ? ' of ' + cfg.target : '');
+    }).join(' · ');
+    return '<p class="mute small" style="margin-top:12px">Sets this week: ' + line + '.</p>';
+  }
+  var FILTERS = { all: 'All', free: 'Free weights', cable: 'Cable', machine: 'Machine' };
+  function passFilter(e, f) {
+    var t = e.equip || [];
+    if (f === 'free') return t.indexOf('barbell') >= 0 || t.indexOf('dumbbell') >= 0 || t.indexOf('any') >= 0 || t.indexOf('rack') >= 0;
+    if (f === 'cable') return t.indexOf('cable') >= 0;
+    if (f === 'machine') return t.indexOf('machine') >= 0 || t.indexOf('smith') >= 0;
+    return true;
+  }
+  function addSheet(bi) {
+    var b = S.current.blocks[bi];
+    var used = {};
+    S.current.blocks.forEach(function (bb) { bb.exercises.forEach(function (e) { used[e.exId] = true; }); });
+    var f = ui.moreFilter || 'all';
+    var done = weekDoneNow(true);
+    var h = '<h3>Add exercise</h3><div class="chips" style="margin-bottom:10px">' + Object.keys(FILTERS).map(function (k) {
+      return '<button class="chip' + (f === k ? ' on' : '') + '" data-act="more-filter" data-b="' + bi + '" data-v="' + k + '">' + FILTERS[k] + '</button>';
+    }).join('') + '</div>';
+    blockSubs(b).forEach(function (m) {
+      var cfg = S.settings.muscleCfg[m];
+      var cands = E.rankCands(E.availableList(lib(), m, S.current.loc, S.settings, S.learned.unavail, new Date()).filter(function (c) { return !used[c.id] && passFilter(c, f); }), function (id) { return histOf(id).length > 0; });
+      h += '<p class="mute small" style="margin:12px 0 4px"><b>' + esc(D.MUSCLE_LABEL[m] || m) + '</b>' + (cfg ? ' · ' + (done[m] || 0) + ' of ' + cfg.target + ' sets this week' : '') + '</p>';
+      if (!cands.length) h += '<p class="mute small">No options with this filter at this location.</p>';
+      cands.forEach(function (c) {
+        var hist = histOf(c.id), last = hist.length ? hist[hist.length - 1].sets : null;
+        var top = last && last[0] ? fmt(last[0].w) + ' × ' + last[0].r : null;
+        h += '<button class="opt" data-act="add-pick" data-b="' + bi + '" data-id="' + esc(c.id) + '"><span>' + esc(c.name) + '</span><span class="sm">' + (top ? 'Last set 1: ' + esc(top) : 'New') + '</span></button>';
+      });
+    });
+    h += '<div class="row-btns"><button class="btn secondary slim" data-act="close-sheet">Cancel</button></div>';
+    openSheet(h);
+  }
+
   function swapSheet(bi, ei) {
     var b = S.current.blocks[bi], ex = b.exercises[ei];
     var used = {};
     S.current.blocks.forEach(function (bb) { bb.exercises.forEach(function (e) { used[e.exId] = true; }); });
-    var cands = E.availableList(lib(), ex.muscle, S.current.loc, S.settings, S.learned.unavail, new Date()).filter(function (c) { return !used[c.id]; });
+    var cands = E.rankCands(E.availableList(lib(), ex.muscle, S.current.loc, S.settings, S.learned.unavail, new Date()).filter(function (c) { return !used[c.id]; }), function (id) { return histOf(id).length > 0; });
     var h = '<h3>Swap ' + esc(ex.name) + '</h3>';
     cands.forEach(function (c) {
       var p = E.planExercise({ ex: c, lib: lib(), histOf: function (id) { return histOf(id); }, now: new Date(), learned: S.learned, g: S.settings.g, location: S.current.loc, ctxKey: S.current.ctxKey });
@@ -631,6 +839,8 @@
     h += '</div></div>';
     h += '<div class="section"><h2>Session</h2><div class="list">' +
       '<div class="cfg" style="grid-template-columns:1fr 80px"><span>Time cap (min)</span><input inputmode="numeric" data-cfg="timeCap" value="' + S.settings.timeCap + '" aria-label="Time cap in minutes"></div>' +
+      '<div class="toggle-row"><span>Rest timer</span><button class="chip' + (S.settings.restTimer ? ' on' : '') + '" data-act="rest-on">' + (S.settings.restTimer ? 'On' : 'Off') + '</button></div>' +
+      '<div class="toggle-row"><span>Timer sound</span><button class="chip' + (S.settings.restSound ? ' on' : '') + '" data-act="rest-snd">' + (S.settings.restSound ? 'On' : 'Off') + '</button></div>' +
       '<div class="toggle-row"><span>Garage has a bench</span><button class="chip' + (S.settings.garageBench ? ' on' : '') + '" data-act="bench">' + (S.settings.garageBench ? 'Yes' : 'No') + '</button></div></div></div>';
     h += '<div class="section"><h2>Backup</h2><p class="mute small" style="margin-bottom:10px">Export after each week. Your data lives on this phone only.</p><div class="row-btns">' +
       '<button class="btn secondary" data-act="export">Export data</button><button class="btn secondary" data-act="import">Import data</button>' +
@@ -684,6 +894,15 @@
           '<div class="row-btns"><button class="btn secondary slim" data-act="close-sheet">Close</button></div>');
         break;
       case 'swap': swapSheet(bi, ei); break;
+      case 'add-ex': addSheet(bi); break;
+      case 'more-filter': ui.moreFilter = el.dataset.v; addSheet(bi); break;
+      case 'add-pick': {
+        var nb = S.current.blocks[bi];
+        nb.exercises.push(makeEx(libById()[el.dataset.id], 3, S.current.ctxKey, S.current.loc, new Date()));
+        ui.openEx = bi + '-' + (nb.exercises.length - 1);
+        save(); closeSheet(); render(); scrollToOpen();
+        break;
+      }
       case 'swap-pick': doSwap(bi, ei, libById()[el.dataset.id]); break;
       case 'custom-ex': {
         var name = window.prompt('Exercise name');
@@ -708,8 +927,13 @@
         break;
       }
       case 'discard':
-        if (window.confirm('Discard this session? Logged sets will be lost.')) { S.current = null; save(); go('#/home'); }
+        if (window.confirm('Discard this session? Logged sets will be lost.')) { S.current = null; stopRest(); save(); go('#/home'); }
         break;
+      case 'rest-on': S.settings.restTimer = !S.settings.restTimer; if (!S.settings.restTimer) stopRest(); save(); render(); break;
+      case 'rest-snd': S.settings.restSound = !S.settings.restSound; save(); render(); if (S.settings.restSound) { unlockAudio(); beep(); } break;
+      case 'rest-add': if (rest) { rest.end += 15000; rest.total += 15; rest.fired = false; rest.fired2 = false; if (rest.setRef) rest.setRef.rp = rest.total; tickRest(); } break;
+      case 'rest-sub': if (rest) { rest.end -= 15000; rest.total = Math.max(15, rest.total - 15); if (rest.setRef) rest.setRef.rp = rest.total; tickRest(); } break;
+      case 'rest-skip': stopRest(); break;
       case 'bench': S.settings.garageBench = !S.settings.garageBench; save(); render(); break;
       case 'export': exportSheet(); break;
       case 'copy-export': {
@@ -772,7 +996,10 @@
   document.addEventListener('change', onChange);
   window.addEventListener('hashchange', render);
   window.addEventListener('pagehide', save);
-  document.addEventListener('visibilitychange', function () { if (document.hidden) save(); });
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) save();
+    else { if (rest) { keepAwake(true); tickRest(); } }
+  });
 
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {

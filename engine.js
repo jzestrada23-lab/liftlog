@@ -123,7 +123,41 @@
     return out;
   }
 
-  function trimToTime(alloc, cfgs, capMinutes) {
+  function composeSets(S) {
+    if (S <= 0) return [];
+    if (S <= 2) return [Math.max(2, S)];
+    var n3 = Math.floor(S / 3), rem = S % 3, out = [], i;
+    if (rem === 0) { for (i = 0; i < n3; i++) out.push(3); return out; }
+    if (rem === 2) { for (i = 0; i < n3; i++) out.push(3); out.push(2); return out; }
+    for (i = 0; i < n3 - 1; i++) out.push(3);
+    out.push(2, 2);
+    return out;
+  }
+
+  function prefRank(e) {
+    var t = e.equip || [];
+    if (t.indexOf('barbell') >= 0 || t.indexOf('dumbbell') >= 0 || t.indexOf('cable') >= 0 || t.indexOf('any') >= 0 || t.indexOf('rack') >= 0) return 0;
+    if (t.indexOf('smith') >= 0) return 1;
+    return 2;
+  }
+  function rankCands(list, hasHist, histFirst) {
+    var idx = {};
+    list.forEach(function (e, i) { idx[e.id] = i; });
+    return list.slice().sort(function (a, b) {
+      var pa = prefRank(a), pb = prefRank(b);
+      var ha = hasHist && hasHist(a.id) ? 0 : 1, hb = hasHist && hasHist(b.id) ? 0 : 1;
+      if (histFirst && ha !== hb) return ha - hb;
+      if (pa !== pb) return pa - pb;
+      if (ha !== hb) return ha - hb;
+      return idx[a.id] - idx[b.id];
+    });
+  }
+  function threeFriendly(S, min) {
+    if (S >= 4 && S % 3 === 1) return S - 1 >= min ? S - 1 : S + 1;
+    return S;
+  }
+
+  function trimToTime(alloc, cfgs, capMinutes, done) {
     var total = function () {
       var t = 0;
       for (var m in alloc) t += alloc[m];
@@ -136,8 +170,21 @@
         var r = alloc[m] - cfgs[m].min;
         if (r > room) { room = r; pick = m; }
       }
-      if (!pick) break;
+      if (!pick) {
+        var drop = null, least = Infinity, live = 0;
+        for (var k in alloc) {
+          if (alloc[k] > 0) {
+            live++;
+            var need = cfgs[k].target - ((done && done[k]) || 0);
+            if (need <= least) { least = need; drop = k; }
+          }
+        }
+        if (!drop || live <= 1) break;
+        alloc[drop] = 0;
+        continue;
+      }
       alloc[pick] -= 1;
+      if (alloc[pick] >= 4 && alloc[pick] % 3 === 1 && alloc[pick] - 1 >= cfgs[pick].min) alloc[pick] -= 1;
     }
     return alloc;
   }
@@ -267,6 +314,21 @@
     return done;
   }
 
+  function weekIndirect(sessions, now, libById) {
+    var start = weekStart(now).getTime();
+    var out = {};
+    sessions.forEach(function (s) {
+      if (!s.date || new Date(s.date).getTime() < start) return;
+      s.exercises.forEach(function (e) {
+        var def = libById[e.exId];
+        if (!def || !def.also) return;
+        var n = e.sets.filter(function (x) { return x.done; }).length;
+        Object.keys(def.also).forEach(function (k) { out[k] = (out[k] || 0) + n * def.also[k]; });
+      });
+    });
+    return out;
+  }
+
   function availableList(lib, muscle, location, settings, unavail, now) {
     var out = lib.filter(function (e) { return e.muscle === muscle && isAvailable(e, location, settings); });
     var recent = function (id) {
@@ -291,6 +353,93 @@
     return out;
   }
 
+  function interleaveSubs(list) {
+    var keys = [], groups = {};
+    list.forEach(function (e) {
+      var k = e.sub || '_';
+      if (!groups[k]) { groups[k] = []; keys.push(k); }
+      groups[k].push(e);
+    });
+    if (keys.length < 2) return list;
+    var out = [], i = 0, more = true;
+    while (more) {
+      more = false;
+      keys.forEach(function (k) {
+        if (groups[k][i]) { out.push(groups[k][i]); more = true; }
+      });
+      i++;
+    }
+    return out;
+  }
+
+  function median(a) {
+    var b = a.slice().sort(function (x, y) { return x - y; });
+    var m = Math.floor(b.length / 2);
+    return b.length % 2 ? b[m] : (b[m - 1] + b[m]) / 2;
+  }
+  var REST_DEFAULT = { compound: 150, iso: 150, bw: 90 };
+  function restSeconds(exId, kind, sessions) {
+    var gaps = [];
+    (sessions || []).forEach(function (s) {
+      (s.exercises || []).forEach(function (e) {
+        if (e.exId !== exId) return;
+        var t = (e.sets || []).filter(function (x) { return x.done && x.at; }).map(function (x) { return new Date(x.at).getTime(); });
+        for (var i = 0; i + 1 < t.length; i++) {
+          var g = (t[i + 1] - t[i]) / 1000;
+          if (g >= 30 && g <= 480) gaps.push(g);
+        }
+      });
+    });
+    var sec = REST_DEFAULT[kind] || 150;
+    if (gaps.length >= 3) {
+      var m1 = median(gaps);
+      var kept = gaps.filter(function (g) { return g <= 2 * m1; });
+      sec = kept.length >= 3 ? median(kept) : m1;
+    }
+    return clamp(Math.round(sec / 15) * 15, 45, 360);
+  }
+
+  var REST_BUCKETS = [
+    { label: 'Under 2:00', lo: 0, hi: 120 },
+    { label: '2:00 to 3:00', lo: 120, hi: 180 },
+    { label: 'Over 3:00', lo: 180, hi: 481 }
+  ];
+  function restStats(sessions) {
+    var pairs = [], per = [];
+    (sessions || []).forEach(function (s) {
+      var vol = 0, gaps = [];
+      (s.exercises || []).forEach(function (e) {
+        var ss = (e.sets || []).filter(function (x) { return x.done; });
+        ss.forEach(function (x) { if (Number(x.w) > 0 && Number(x.r) > 0) vol += Number(x.w) * Number(x.r); });
+        var u = ss.filter(function (x) { return x.at && !x.flag && Number(x.r) > 0 && Number(x.w) > 0; });
+        for (var i = 0; i + 1 < u.length; i++) {
+          var g = (new Date(u[i + 1].at) - new Date(u[i].at)) / 1000;
+          if (g < 30 || g > 480) continue;
+          var a = e1rm(Number(u[i].w), Number(u[i].r), u[i].rpe), b = e1rm(Number(u[i + 1].w), Number(u[i + 1].r), u[i + 1].rpe);
+          pairs.push({ g: g, ret: b / a, rp: Number(u[i].rp) || 0 });
+          gaps.push(g);
+        }
+      });
+      if (!s.seed && gaps.length && s.finishedAt && s.date) {
+        var min = (new Date(s.finishedAt) - new Date(s.date)) / 60000;
+        if (min > 5) per.push({ id: s.id, type: s.type, date: s.date, avgRest: gaps.reduce(function (a, b) { return a + b; }, 0) / gaps.length, volume: vol, minutes: min, perMin: vol / min });
+      }
+    });
+    var buckets = REST_BUCKETS.map(function (b) {
+      var x = pairs.filter(function (p) { return p.g >= b.lo && p.g < b.hi; });
+      return { label: b.label, n: x.length, ret: x.length ? x.reduce(function (a, p) { return a + p.ret; }, 0) / x.length : null };
+    });
+    var planned = pairs.filter(function (p) { return p.rp > 0; });
+    var over = planned.filter(function (p) { return p.g > p.rp + 30; });
+    var on = planned.filter(function (p) { return p.g <= p.rp + 30; });
+    var avg = function (a) { return a.length ? a.reduce(function (t, p) { return t + p.ret; }, 0) / a.length : null; };
+    var adherence = {
+      n: planned.length, overN: over.length, onN: on.length, overRet: avg(over), onRet: avg(on),
+      avgOver: over.length ? over.reduce(function (t, p) { return t + (p.g - p.rp); }, 0) / over.length : 0
+    };
+    return { buckets: buckets, sessions: per, pairs: pairs.length, adherence: adherence };
+  }
+
   var GARAGE_TAGS = ['barbell', 'dumbbell', 'cable', 'smith', 'rack'];
   function isAvailable(ex, location, settings) {
     if (ex.equip.indexOf('any') >= 0) return true;
@@ -307,25 +456,28 @@
     var alloc = {};
     muscles.forEach(function (m) {
       var cands = availableList(o.lib, m, o.location, o.settings, o.learned && o.learned.unavail, o.now);
-      alloc[m] = cands.length ? setsFor(cfgs[m], done[m] || 0, o.again) : 0;
+      alloc[m] = cands.length ? threeFriendly(setsFor(cfgs[m], done[m] || 0, o.again), cfgs[m].min) : 0;
     });
-    trimToTime(alloc, cfgs, o.timeCap || 60);
+    trimToTime(alloc, cfgs, o.timeCap || 60, done);
     var blocks = tpl.blocks.map(function (b) {
       var exs = [];
       b.muscles.forEach(function (m) {
         var S = alloc[m];
         if (!S) return;
-        var cands = uniqueVariants(availableList(o.lib, m, o.location, o.settings, o.learned && o.learned.unavail, o.now));
-        var n = clamp(Math.ceil(S / 3), 1, Math.min(3, cands.length));
-        var parts = distribute(S, n);
-        for (var i = 0; i < n; i++) {
+        var cands = uniqueVariants(rankCands(availableList(o.lib, m, o.location, o.settings, o.learned && o.learned.unavail, o.now), o.hasHist, true));
+        var parts = composeSets(S);
+        while (parts.length > cands.length) {
+          var last = parts.pop();
+          parts[parts.length - 1] += last;
+        }
+        for (var i = 0; i < parts.length; i++) {
           exs.push({ ex: cands[i], sets: parts[i] });
         }
       });
       return { id: b.id, name: b.name, items: exs };
     });
     var total = 0;
-    for (var m2 in alloc) total += alloc[m2];
+    blocks.forEach(function (b) { b.items.forEach(function (it) { total += it.sets; }); });
     return { blocks: blocks, alloc: alloc, totalSets: total, minutes: Math.round(total * MIN_PER_SET) };
   }
 
@@ -409,7 +561,7 @@
     ctxKey: ctxKey, ctxMult: ctxMult, timeBucket: timeBucket, weekStart: weekStart,
     setsFor: setsFor, distribute: distribute, trimToTime: trimToTime,
     planExercise: planExercise, setTarget: setTarget, planSession: planSession,
-    weekDone: weekDone, availableList: availableList, uniqueVariants: uniqueVariants, isAvailable: isAvailable,
+    weekDone: weekDone, weekIndirect: weekIndirect, composeSets: composeSets, rankCands: rankCands, prefRank: prefRank, availableList: availableList, uniqueVariants: uniqueVariants, interleaveSubs: interleaveSubs, restSeconds: restSeconds, restStats: restStats, isAvailable: isAvailable,
     updateLearning: updateLearning, seedLearn: seedLearn, expectedRpe: expectedRpe
   };
 });
