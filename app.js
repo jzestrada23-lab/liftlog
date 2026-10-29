@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   var E = Engine, D = Data;
-  var APP_VERSION = '2.1';
+  var APP_VERSION = '2.4';
   var APP_BUILD = '2026-10-29';
   var KEY = 'liftlog.v1';
   var TYPES = ['Push', 'Pull', 'Legs', 'Upper', 'Lower'];
@@ -22,8 +22,9 @@
     var learned = E.seedLearn(sessions, { k: {}, ctx: {}, d2: {}, unavail: {} });
     return {
       v: 2,
-      settings: { g: 0.005, timeCap: 60, garageBench: true, restTimer: true, restSound: true, muscleCfg: clone(D.MUSCLE_CFG) },
-      sessions: sessions, custom: [], learned: learned, current: null
+      settings: { g: 0.005, timeCap: 60, garageBench: true, restTimer: true, restSound: true, name: 'Jesse', muscleCfg: clone(D.MUSCLE_CFG) },
+      sessions: sessions, custom: [], learned: learned, current: null,
+      goals: { week: '', list: [], dismissed: [] }, greet: { key: '', id: null, head: '', line: '', seen: [] }
     };
   }
   function migrate(s) {
@@ -63,6 +64,8 @@
     s.custom = s.custom || [];
     s.learned = Object.assign({ k: {}, ctx: {}, d2: {}, unavail: {} }, s.learned || {});
     if (s.current === undefined) s.current = null;
+    s.goals = s.goals || d.goals;
+    s.greet = s.greet || d.greet;
     return s;
   }
   function load() {
@@ -307,7 +310,7 @@
       $rest.className = 'rest';
       $rest.hidden = true;
       $rest.innerHTML = '<div class="rest-fill"></div><div class="rest-row"><div><div class="rest-name"></div><div class="rest-time num"></div></div>' +
-        '<div class="rest-btns"><button data-act="rest-sub" aria-label="15 seconds less">−15</button><button data-act="rest-add" aria-label="15 seconds more">+15</button><button data-act="rest-skip">Skip</button></div></div>';
+        '<div class="rest-btns"><button data-act="rest-sub" aria-label="15 seconds less">−15</button><button data-act="rest-add" aria-label="15 seconds more">+15</button><button class="go" data-act="rest-start">Start set</button></div></div>';
       document.body.appendChild($rest);
     }
     return $rest;
@@ -317,7 +320,7 @@
     unlockAudio();
     keepAwake(true);
     var sec = E.restSeconds(ex.exId, ex.plan && ex.plan.kind, S.sessions);
-    rest = { end: Date.now() + sec * 1000, total: sec, name: ex.name, fired: false, fired2: false, setRef: setRef || null };
+    rest = { end: Date.now() + sec * 1000, total: sec, name: ex.name, fired: false, fired2: false, setRef: setRef || null, started: Date.now() };
     if (setRef) setRef.rp = sec;
     document.body.classList.add('has-rest');
     var el = restEl();
@@ -539,6 +542,119 @@
     return h + '</div>';
   }
 
+  /* ---------- Home: greeting, goals, body map ---------- */
+  function coachSessions() {
+    return S.sessions.concat(S.current ? [{ date: S.current.date, type: S.current.type, exercises: flat(S.current) }] : []);
+  }
+  function coachOpts() {
+    return {
+      sessions: coachSessions(), cfg: S.settings.muscleCfg, labels: D.MUSCLE_LABEL, now: new Date(),
+      name: S.settings.name || 'Jesse', nextType: suggestType(), libById: libById(),
+      exName: function (id) { var x = libById()[id]; return x && x.name; }
+    };
+  }
+  function goalsState() {
+    var wk = E.weekStart(new Date()).toISOString().slice(0, 10);
+    if (!S.goals || S.goals.week !== wk) { S.goals = { week: wk, list: [], dismissed: [] }; save(); }
+    return S.goals;
+  }
+  function greetCard(o) {
+    var c = Coach.buildCtx(o);
+    var key = new Date().toDateString() + '|' + c.period + '|' + S.sessions.length + '|' + (S.current ? 1 : 0) + '|' + (S.settings.name || '');
+    var g = S.greet;
+    if (g.key !== key) {
+      var pick = Coach.greeting(c, g.seen || [], Math.random);
+      var seen = (g.seen || []).concat(pick.id ? [pick.id] : []).slice(-10);
+      S.greet = g = { key: key, id: pick.id, head: pick.head, line: pick.line, seen: seen };
+      save();
+    }
+    return '<div class="greet"><div class="g-head">' + esc(g.head) + '</div><div class="g-line">' + esc(g.line) + '</div></div>';
+  }
+  function goalsCard(o) {
+    var gs = goalsState();
+    var sug = Coach.suggestGoals(o);
+    var accepted = {};
+    gs.list.forEach(function (g) { accepted[g.id] = true; });
+    var offers = sug.goals.filter(function (g) { return !accepted[g.id] && gs.dismissed.indexOf(g.id) < 0; }).slice(0, 3);
+    var h = '<div class="section"><h2>Goals this week</h2>';
+    if (!gs.list.length && !offers.length) h += '<p class="mute small">No goal needed right now. Nothing in your data calls for one.</p>';
+    gs.list.forEach(function (g) {
+      var pr = Coach.goalProgress(g, o);
+      h += '<div class="goal' + (pr.done ? ' met' : '') + '"><div class="goal-top"><b>' + esc(g.title) + '</b><button class="ghost" data-act="goal-del" data-id="' + esc(g.id) + '" aria-label="Remove goal">Remove</button></div>' +
+        '<div class="track"><span class="fill" style="display:block;width:' + Math.round(pr.pct) + '%"></span></div>' +
+        '<div class="mute small">' + esc(pr.text) + (pr.done ? ' · done' : '') + '</div><div class="mute small ev">' + esc(g.evidence) + '</div></div>';
+    });
+    offers.forEach(function (g) {
+      h += '<div class="goal offer"><div class="goal-top"><b>' + esc(g.title) + '</b></div><div class="mute small ev">' + esc(g.evidence) + '</div>' +
+        '<div class="offer-btns"><button class="chip on" data-act="goal-add" data-id="' + esc(g.id) + '">Accept</button><button class="chip" data-act="goal-skip" data-id="' + esc(g.id) + '">Skip</button></div></div>';
+    });
+    sug.notes.forEach(function (n) { h += '<p class="mute small note-line">' + esc(n) + '</p>'; });
+    return h + '</div>';
+  }
+  function armList(regs, st) {
+    return '<ul class="arm-list">' + regs.map(function (r) {
+      var x = st[r.id] || {};
+      return '<li data-region="' + r.id + '"><span>' + esc(r.lab) + '</span><span class="num">' + Math.round(x.pct || 0) + '%' + (x.days != null ? ' · ' + esc(Body.dayText(x.days)) : '') + '</span></li>';
+    }).join('') + '</ul>';
+  }
+  var BODY_SLIDES = ['Upper body', 'Arms', 'Legs'];
+  var ANAT_PAL = { base: '#8a6a66', passive: '#5f4c4a', tendon: '#d8cfbf', deep: '#3a2c2b' };
+  function bodySlide() { return (((ui.bodySlide || 0) % 3) + 3) % 3; }
+  function bodyCard(o) {
+    var rs = Coach.regionState(o.sessions, o.cfg, D.MUSCLE_LABEL, o.now), st = {};
+    Object.keys(rs).forEach(function (k) {
+      var hh = Body.heat(rs[k].days);
+      st[k] = { pct: rs[k].pct, fill: hh.on ? hh.fill : null };
+    });
+    var i = bodySlide();
+    var figs = i === 0 ? [Anatomy.UPPER_FRONT, Anatomy.UPPER_BACK] : i === 1 ? [Anatomy.ARM_ANT, Anatomy.ARM_LAT, Anatomy.ARM_POST] : [Anatomy.LEG_FRONT, Anatomy.LEG_BACK];
+    var names = i === 0 ? ['Upper body front', 'Upper body back'] : i === 1 ? ['Arm front', 'Arm side', 'Arm back'] : ['Legs front', 'Legs back'];
+    var h = '<div class="section"><h2>Body map</h2>';
+    h += '<div class="body-wrap anat-slide n' + figs.length + '">' + figs.map(function (f, k) { return Anatomy.figure(f, st, ANAT_PAL, { label: names[k] }); }).join('') + '</div>';
+    h += '<div class="anat-nav"><button class="anat-arrow" data-act="body-prev" aria-label="Previous view">‹</button><span class="anat-t">' + BODY_SLIDES[i] + '</span><span class="anat-dots">' +
+      [0, 1, 2].map(function (k) { return '<button class="anat-dot' + (k === i ? ' on' : '') + '" data-act="body-go" data-v="' + k + '" aria-label="' + BODY_SLIDES[k] + '"></button>'; }).join('') +
+      '</span><button class="anat-arrow" data-act="body-next" aria-label="Next view">›</button></div>';
+    h += Body.legend();
+    h += '<p class="mute small">Number is this week\'s sets as a share of target. Color is days since last trained. Swipe for arms and legs. Tap a muscle for detail.</p></div>';
+    return h;
+  }
+  function regionSheet(id) {
+    var o = coachOpts();
+    var st = Coach.regionState(o.sessions, o.cfg, D.MUSCLE_LABEL, o.now);
+    var subs = st[id] && st[id].group ? st[id].group : [id];
+    var title = st[id] ? st[id].label : id;
+    var ws = E.weekStart(o.now).getTime();
+    var h = '<h3>' + esc(title) + '</h3>';
+    subs.forEach(function (m) {
+      var x = st[m]; if (!x) return;
+      var names = {};
+      o.sessions.forEach(function (s) {
+        if (!s.date || ts(s.date) < ws) return;
+        (s.exercises || []).forEach(function (e) {
+          if (e.muscle !== m) return;
+          var n = e.sets.filter(function (q) { return q.done; }).length;
+          if (n) names[e.name] = (names[e.name] || 0) + n;
+        });
+      });
+      var list = Object.keys(names).map(function (k) { return esc(k) + ' (' + names[k] + ')'; }).join(', ');
+      var last = x.lastDate ? esc(fmtDate(new Date(x.lastDate).toISOString())) + ', ' + esc(Coach.agoText(o.now.getTime() - x.lastDate)) : 'never logged in the app';
+      h += '<div class="rg">' + (subs.length > 1 ? '<b>' + esc(x.label) + '</b>' : '') + '<div class="mute small">' + x.done + ' of ' + x.target + ' sets this week</div>' +
+        '<div class="mute small">Last trained: ' + last + '</div>' +
+        '<div class="mute small">Counted this week: ' + (list || 'none yet') + '</div></div>';
+    });
+    h += '<div class="row-btns"><button class="btn secondary slim" data-act="close-sheet">Close</button></div>';
+    openSheet(h);
+  }
+  function homeTop() {
+    var o = coachOpts();
+    return greetCard(o) + goalsCard(o) + bodyCard(o);
+  }
+  function pinBar() {
+    return '<div class="pin">' + (S.current
+      ? '<button class="btn" data-go="#/session">Resume ' + esc(S.current.type) + ' session</button>'
+      : '<button class="btn" data-go="#/start">Start session</button>') + '</div>';
+  }
+
   function vHome() {
     var done = weekDoneNow(true);
     var byId = libById();
@@ -550,11 +666,7 @@
     var recent = S.sessions.filter(function (s) { return !s.seed; }).sort(function (a, b) { return ts(b.date) - ts(a.date); }).slice(0, 8);
 
     var h = '<div class="top"><h1>LiftLog</h1><button class="back" data-go="#/settings" aria-label="Settings">Settings</button></div>';
-    if (S.current) {
-      h += '<button class="btn" data-go="#/session">Resume ' + esc(S.current.type) + ' session</button>';
-    } else {
-      h += '<button class="btn" data-go="#/start">Start session</button>';
-    }
+    h += homeTop();
     var standalone = window.navigator.standalone || (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
     if (!standalone && /iPhone|iPad/.test(navigator.userAgent) && !localStorage.getItem('liftlog.tip')) {
       h += '<div class="notice section"><span>Install: tap Share, then Add to Home Screen.</span><button class="ghost" data-act="hide-tip">Hide</button></div>';
@@ -577,7 +689,7 @@
         return '<button data-go="#/summary/' + s.id + '"><span><span class="t">' + esc(s.type) + '</span> <span class="mute small">' + esc(s.loc === 'garage' ? 'Garage' : 'Gym') + '</span></span><span class="mute num">' + esc(fmtDate(s.date)) + ' · ' + sets + ' sets</span></button>';
       }).join('') + '</div>';
     }
-    return h + '</div>';
+    return h + '</div>' + pinBar();
   }
 
   function vStart() {
@@ -628,17 +740,17 @@
     var ex = S.current.blocks[bi].exercises[ei], s = ex.sets[k];
     var key = 'data-b="' + bi + '" data-e="' + ei + '" data-s="' + k + '"';
     if (s.done) {
-      return '<div class="set is-done"><span class="sno">' + (k + 1) + '</span><span class="val">' + esc(valText(ex, s)) + '</span><span class="sub">' + (s.rpe ? 'RPE ' + fmt(s.rpe) : '') + (s.flag ? (s.rpe ? ' · ' : '') + 'momentum' : '') + '</span><button class="ghost" data-act="undo" ' + key + '>Edit</button></div>';
+      return '<div class="set is-done"><span class="sno">' + (k + 1) + '</span><span class="val">' + esc(valText(ex, s)) + '</span><span class="sub">' + (s.extra ? 'extra' + (s.rpe ? ' · ' : '') : '') + (s.rpe ? 'RPE ' + fmt(s.rpe) : '') + (s.flag ? (s.rpe ? ' · ' : '') + 'momentum' : '') + '</span><button class="ghost" data-act="undo" ' + key + '>Edit</button></div>';
     }
     var t = E.setTarget(ex.plan, ex.sets, k);
     var tt = targetText(ex, k);
     var ph = t ? (t.r != null ? t.r : t.rHi) : '';
-    var h = '<div class="set"><div class="set-top"><span class="sno">' + (k + 1) + '</span>' +
+    var h = '<div class="set"><div class="set-top"><span class="sno">' + (k + 1) + '</span>' + (s.extra ? '<span class="xtag">extra</span>' : '') +
       (tt ? '<span class="tgt">' + esc(tt) + '</span>' : '<span class="tgt none">' + (k === 0 ? 'Pick a weight, then log the set' : 'Targets appear after set 1') + '</span>') + '</div>';
     h += '<div class="set-in"><label><input data-f="w" ' + key + ' inputmode="decimal" value="' + esc(s.w) + '" aria-label="Weight in pounds"><span class="u">lb</span></label>' +
       '<label><input data-f="r" ' + key + ' inputmode="numeric" value="' + esc(s.r) + '" placeholder="' + esc(ph) + '" aria-label="Reps"><span class="u">reps</span></label>' +
       '<button class="ok" data-act="done" ' + key + ' aria-label="Log set">✓</button></div>';
-    h += '<div class="chips"><span class="lbl">RPE</span>' + [7, 8, 9, 10].map(function (v) { return '<button class="chip' + (s.rpe === v ? ' on' : '') + '" data-act="rpe" data-v="' + v + '" ' + key + '>' + v + '</button>'; }).join('') +
+    h += '<div class="chips"><span class="lbl">RPE</span>' + [5, 6, 7, 8, 9, 10].map(function (v) { return '<button class="chip' + (s.rpe === v ? ' on' : '') + '" data-act="rpe" data-v="' + v + '" ' + key + '>' + v + '</button>'; }).join('') +
       '<button class="chip warn' + (s.flag ? ' on' : '') + '" data-act="mom" ' + key + '>Momentum</button></div>';
     if (t && t.alt) h += '<button class="alt" data-act="alt" data-w="' + t.alt.w + '" ' + key + '>Or <b>' + fmt(t.alt.w) + ' × ' + t.alt.r + '</b> for more reps. Tap to use ' + fmt(t.alt.w) + '.</button>';
     return h + '</div>';
@@ -658,7 +770,7 @@
       if (ex.plan.note) h += '<p class="ex-note">' + esc(ex.plan.note) + (ex.plan.capped ? ' Dumbbells top out at 80 lb here.' : '') + '</p>';
       if (ex.swappedFrom) h += '<p class="sub">Swapped from ' + esc(ex.swappedFrom) + '.</p>';
       ex.sets.forEach(function (s, k) { h += setRow(bi, ei, k); });
-      h += '<div class="tools"><button class="tool' + (ex.note ? ' has' : '') + '" data-act="note" data-b="' + bi + '" data-e="' + ei + '">' + (ex.note ? 'Note saved' : 'Note') + '</button>' +
+      h += '<div class="tools"><button class="tool" data-act="add-set" data-b="' + bi + '" data-e="' + ei + '">Add set</button><button class="tool' + (ex.note ? ' has' : '') + '" data-act="note" data-b="' + bi + '" data-e="' + ei + '">' + (ex.note ? 'Note saved' : 'Note') + '</button>' +
         '<button class="tool" data-act="exmenu" data-b="' + bi + '" data-e="' + ei + '">More</button></div></div>';
     }
     return h + '</div>';
@@ -880,6 +992,7 @@
     h += '</div></div>';
     h += '<div class="section"><h2>Session</h2><div class="list">' +
       '<div class="cfg" style="grid-template-columns:1fr 80px"><span>Time cap (min)</span><input inputmode="numeric" data-cfg="timeCap" value="' + S.settings.timeCap + '" aria-label="Time cap in minutes"></div>' +
+      '<div class="cfg" style="grid-template-columns:1fr 140px"><span>Your name</span><input type="text" data-name="1" value="' + esc(S.settings.name || '') + '" aria-label="Your name" maxlength="20"></div>' +
       '<div class="toggle-row"><span>Rest timer</span><button class="chip' + (S.settings.restTimer ? ' on' : '') + '" data-act="rest-on">' + (S.settings.restTimer ? 'On' : 'Off') + '</button></div>' +
       '<div class="toggle-row"><span>Timer sound</span><button class="chip' + (S.settings.restSound ? ' on' : '') + '" data-act="rest-snd">' + (S.settings.restSound ? 'On' : 'Off') + '</button></div>' +
       '<div class="toggle-row"><span>Garage has a bench</span><button class="chip' + (S.settings.garageBench ? ' on' : '') + '" data-act="bench">' + (S.settings.garageBench ? 'Yes' : 'No') + '</button></div></div></div>';
@@ -905,11 +1018,24 @@
   function onClick(ev) {
     var nav = ev.target.closest('[data-go]');
     if (nav) { closeSheet(); return location.hash === nav.dataset.go ? render() : (location.hash = nav.dataset.go); }
+    var rg = ev.target.closest('[data-region]');
+    if (rg && !ev.target.closest('[data-act]')) return regionSheet(rg.dataset.region);
     var el = ev.target.closest('[data-act]');
     if (!el) { if (ev.target === $sheet) closeSheet(); return; }
     var a = el.dataset.act, bi = Number(el.dataset.b), ei = Number(el.dataset.e), k = Number(el.dataset.s);
     var ex = S.current && !isNaN(bi) && S.current.blocks[bi] ? S.current.blocks[bi].exercises[ei] : null;
     switch (a) {
+      case 'body-side': ui.bodySide = el.dataset.v; render(); break;
+      case 'body-go': ui.bodySlide = Number(el.dataset.v); render(); break;
+      case 'body-prev': ui.bodySlide = bodySlide() + 2; render(); break;
+      case 'body-next': ui.bodySlide = bodySlide() + 1; render(); break;
+      case 'goal-add': {
+        var gs = goalsState(), sg = Coach.suggestGoals(coachOpts()).goals.filter(function (g) { return g.id === el.dataset.id; })[0];
+        if (sg) { gs.list.push(sg); save(); render(); }
+        break;
+      }
+      case 'goal-skip': goalsState().dismissed.push(el.dataset.id); save(); render(); break;
+      case 'goal-del': { var g2 = goalsState(); g2.list = g2.list.filter(function (g) { return g.id !== el.dataset.id; }); g2.dismissed.push(el.dataset.id); save(); render(); break; }
       case 'hide-tip': localStorage.setItem('liftlog.tip', '1'); render(); break;
       case 'st-type': ui.start.type = el.dataset.v; render(); break;
       case 'st-loc': ui.start.loc = el.dataset.v; render(); break;
@@ -954,7 +1080,7 @@
         doSwap(bi, ei, c);
         break;
       }
-      case 'add-set': ex.sets.push({ w: ex.sets.length ? ex.sets[ex.sets.length - 1].w : '', r: '', rpe: null, flag: false, done: false }); save(); closeSheet(); ui.openEx = bi + '-' + ei; render(); break;
+      case 'add-set': ex.sets.push({ w: ex.sets.length ? ex.sets[ex.sets.length - 1].w : '', r: '', rpe: null, flag: false, done: false, extra: true }); save(); closeSheet(); ui.openEx = bi + '-' + ei; render(); break;
       case 'rm-set':
         if (ex.sets.length > 1 && !ex.sets[ex.sets.length - 1].done) { ex.sets.pop(); save(); }
         else toast('The last set is logged or the only set.');
@@ -976,6 +1102,14 @@
       case 'rest-add': if (rest) { rest.end += 15000; rest.total += 15; rest.fired = false; rest.fired2 = false; if (rest.setRef) rest.setRef.rp = rest.total; tickRest(); } break;
       case 'rest-sub': if (rest) { rest.end -= 15000; rest.total = Math.max(15, rest.total - 15); if (rest.setRef) rest.setRef.rp = rest.total; tickRest(); } break;
       case 'rest-skip': stopRest(); break;
+      case 'rest-start': {
+        if (!rest) break;
+        var rsec = Math.max(0, Math.round((Date.now() - rest.started) / 1000));
+        if (rest.setRef) rest.setRef.ra = rsec;
+        stopRest();
+        toast('Rested ' + Math.floor(rsec / 60) + ':' + (rsec % 60 < 10 ? '0' : '') + (rsec % 60) + '. Go.');
+        break;
+      }
       case 'bench': S.settings.garageBench = !S.settings.garageBench; save(); render(); break;
       case 'export': exportSheet(); break;
       case 'copy-export': {
@@ -1019,6 +1153,8 @@
     } else if (t.id === 'perf-note') {
       var s = S.sessions.filter(function (x) { return x.id === t.dataset.sid; })[0];
       if (s) { s.perfNote = t.value; saveSoon(); }
+    } else if (t.dataset.name) {
+      S.settings.name = t.value.trim().slice(0, 20) || 'Jesse'; S.greet.key = ''; saveSoon();
     } else if (t.dataset.cfg) {
       var n = Number(t.value);
       if (!(n >= 0)) return;
@@ -1033,6 +1169,13 @@
     if (ev.target.dataset.act === 'chart-ex') { ui.chartEx = ev.target.value; render(); }
   }
 
+  var swipeX = null;
+  document.addEventListener('touchstart', function (e) { swipeX = e.target.closest && e.target.closest('.body-wrap') ? e.touches[0].clientX : null; }, { passive: true });
+  document.addEventListener('touchend', function (e) {
+    if (swipeX == null) return;
+    var dx = e.changedTouches[0].clientX - swipeX; swipeX = null;
+    if (Math.abs(dx) > 50) { ui.bodySlide = bodySlide() + (dx < 0 ? 1 : 2); render(); }
+  }, { passive: true });
   document.addEventListener('click', onClick);
   document.addEventListener('input', onInput);
   document.addEventListener('change', onChange);

@@ -293,10 +293,11 @@
     var Ek = Ebase * dFactor(plan.d2, k);
     var r = clamp(Math.round(repsAt(Ek, w)), 1, plan.reps[1] + 2);
     if (prev && prev.done && Number(prev.r) > 0) r = Math.max(r, Math.round(Number(prev.r) * 0.65));
+    if (sets[k] && sets[k].extra && prev && prev.done && Number(prev.r) > 0) r = Math.min(r, Math.round(Number(prev.r)));
     var out = { w: w, r: r };
     if (r < plan.reps[0] - 1) {
       var wAlt = weightForReps(Ek, plan.reps[0], plan.inc);
-      if (wAlt < w) out.alt = { w: wAlt, r: plan.reps[0] };
+      if (wAlt < w && !(sets[k] && sets[k].extra)) out.alt = { w: wAlt, r: plan.reps[0] };
     }
     return out;
   }
@@ -383,9 +384,9 @@
     (sessions || []).forEach(function (s) {
       (s.exercises || []).forEach(function (e) {
         if (e.exId !== exId) return;
-        var t = (e.sets || []).filter(function (x) { return x.done && x.at; }).map(function (x) { return new Date(x.at).getTime(); });
-        for (var i = 0; i + 1 < t.length; i++) {
-          var g = (t[i + 1] - t[i]) / 1000;
+        var us = (e.sets || []).filter(function (x) { return x.done && x.at; });
+        for (var i = 0; i + 1 < us.length; i++) {
+          var g = Number(us[i].ra) > 0 ? Number(us[i].ra) : (new Date(us[i + 1].at) - new Date(us[i].at)) / 1000;
           if (g >= 30 && g <= 480) gaps.push(g);
         }
       });
@@ -413,7 +414,7 @@
         ss.forEach(function (x) { if (Number(x.w) > 0 && Number(x.r) > 0) vol += Number(x.w) * Number(x.r); });
         var u = ss.filter(function (x) { return x.at && !x.flag && Number(x.r) > 0 && Number(x.w) > 0; });
         for (var i = 0; i + 1 < u.length; i++) {
-          var g = (new Date(u[i + 1].at) - new Date(u[i].at)) / 1000;
+          var g = Number(u[i].ra) > 0 ? Number(u[i].ra) : (new Date(u[i + 1].at) - new Date(u[i].at)) / 1000;
           if (g < 30 || g > 480) continue;
           var a = e1rm(Number(u[i].w), Number(u[i].r), u[i].rpe), b = e1rm(Number(u[i + 1].w), Number(u[i + 1].r), u[i + 1].rpe);
           pairs.push({ g: g, ret: b / a, rp: Number(u[i].rp) || 0 });
@@ -485,7 +486,7 @@
     learned.k = learned.k || {}; learned.ctx = learned.ctx || {}; learned.d2 = learned.d2 || {}; learned.unavail = learned.unavail || {};
     var key = ctxKey(session.bucket, session.fed);
     session.exercises.forEach(function (e) {
-      var sets = e.sets.filter(function (s) { return s.done; });
+      var sets = e.sets.filter(function (s) { return s.done && !s.extra; });
       var E1 = firstDoneE(e.sets);
       if (e.plan && e.plan.mode === 'known' && E1 && e.plan.Eraw) {
         var ratio = clamp(E1 / e.plan.Eraw, 0.8, 1.2);
