@@ -33,7 +33,7 @@
     return out;
   }
 
-  function regionState(sessions, cfg, labels, now) {
+  function regionState(sessions, cfg, labels, now, glute) {
     var w = weekStats(sessions, cfg, now);
     var n = now.getTime ? now.getTime() : new Date(now).getTime();
     var st = {};
@@ -48,6 +48,20 @@
     };
     arm('arm_front', ARM_FRONT, 'Front of arm');
     arm('arm_back', ARM_BACK, 'Back of arm');
+    if (glute && cfg.quads) {
+      var ws = E.weekStart(now).getTime(), credit = 0, last = null, names = {};
+      sessions.forEach(function (s) {
+        var t = ts(s.date);
+        if (t == null) return;
+        (s.exercises || []).forEach(function (e) {
+          var f = glute[e.exId], nd = doneSets(e).length;
+          if (!f || !nd) return;
+          if (t >= ws) { credit += f * nd; names[e.name || e.exId] = (names[e.name || e.exId] || 0) + f * nd; }
+          if (last == null || t > last) last = t;
+        });
+      });
+      st.glutes = { pct: Math.min(100, 100 * credit / cfg.quads.target), days: last != null ? Math.max(0, (n - last) / DAY) : null, done: Math.round(credit * 10) / 10, target: cfg.quads.target, label: labels.glutes || 'Glutes', lastDate: last, credit: names, rides: 'quads' };
+    }
     return st;
   }
 

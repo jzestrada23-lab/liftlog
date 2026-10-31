@@ -126,8 +126,10 @@
     side_delt: 'Side delts', rear_delt: 'Rear delts',
     tri_long: 'Triceps long head', tri_lat: 'Triceps lateral',
     bi_long: 'Biceps long head', bi_short: 'Biceps short head',
-    forearms: 'Forearms', quads: 'Quads', hamstrings: 'Hamstrings', adductors: 'Adductors'
+    forearms: 'Forearms', quads: 'Quads', hamstrings: 'Hamstrings', adductors: 'Adductors', glutes: 'Glutes'
   };
+
+  var GLUTE = { hack_squat: 0.5, squat_bb: 0.5, front_squat: 0.5, squat_smith: 0.5, leg_press: 0.5, split_squat_db: 1, rdl_db: 1, rdl_bb: 1, good_morning: 1, sldl_db: 1 };
 
   var MUSCLE_CFG = {
     lats: { target: 10, cap: 6, min: 3 },
@@ -211,5 +213,5 @@
     ];
   }
 
-  return { LIB: LIB, MUSCLE_LABEL: MUSCLE_LABEL, MUSCLE_CFG: MUSCLE_CFG, SESSIONS: SESSIONS, seedSessions: seedSessions, subFor: subFor, OLD_MUSCLE: OLD_MUSCLE };
+  return { GLUTE: GLUTE, LIB: LIB, MUSCLE_LABEL: MUSCLE_LABEL, MUSCLE_CFG: MUSCLE_CFG, SESSIONS: SESSIONS, seedSessions: seedSessions, subFor: subFor, OLD_MUSCLE: OLD_MUSCLE };
 });

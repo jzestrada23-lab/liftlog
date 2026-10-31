@@ -302,6 +302,38 @@
     return out;
   }
 
+  var FAT_K = 0.015, FAT_MIN = 0.85;
+  function fatigueLoad(cur, prior, libById) {
+    var n = 0, def;
+    prior.forEach(function (p) {
+      if (!p.n) return;
+      if (p.muscle === cur.muscle) { n += p.n; return; }
+      def = libById && libById[p.exId];
+      if (def && def.also && def.also[cur.muscle]) n += p.n * def.also[cur.muscle];
+    });
+    return Math.round(n * 10) / 10;
+  }
+  function fatMult(n, k) {
+    var kk = k != null ? k : FAT_K;
+    return Math.max(FAT_MIN, 1 - kk * n);
+  }
+  function fatPlan(base, mult) {
+    var p = JSON.parse(JSON.stringify(base));
+    if (!(mult < 1)) return p;
+    var inc = p.inc || 5;
+    if (p.mode === 'known') {
+      p.E = p.E * mult;
+      var w = roundTo(p.w * mult, inc);
+      if (w === p.w) p.r = Math.max(1, Math.min(p.r, Math.round(repsAt(p.E, p.w))));
+      else { p.w = w; p.r = Math.max(1, Math.round(repsAt(p.E, w))); }
+    } else if (p.mode === 'range' || p.mode === 'swap') {
+      p.E = p.E * mult;
+      p.wLo = roundTo(p.wLo * mult, inc);
+      p.wHi = roundTo(p.wHi * mult, inc);
+    }
+    return p;
+  }
+
   function weekDone(sessions, now, libById) {
     var start = weekStart(now).getTime();
     var done = {};
@@ -488,7 +520,15 @@
     session.exercises.forEach(function (e) {
       var sets = e.sets.filter(function (s) { return s.done && !s.extra; });
       var E1 = firstDoneE(e.sets);
-      if (e.plan && e.plan.mode === 'known' && E1 && e.plan.Eraw) {
+      if (e.fatN > 0 && e.planBase && e.planBase.mode === 'known' && E1 && e.planBase.E) {
+        learned.fatK = learned.fatK || {};
+        if (e.fatN >= 2) {
+          var kObs = clamp((1 - E1 / e.planBase.E) / e.fatN, 0, 0.05);
+          var fk = learned.fatK[e.muscle];
+          learned.fatK[e.muscle] = fk ? { k: fk.k * 0.7 + kObs * 0.3, n: fk.n + 1 } : { k: FAT_K * 0.5 + kObs * 0.5, n: 1 };
+        }
+      }
+      if (!(e.fatN > 0) && e.plan && e.plan.mode === 'known' && E1 && e.plan.Eraw) {
         var ratio = clamp(E1 / e.plan.Eraw, 0.8, 1.2);
         var c = learned.ctx[key] || { n: 0, mean: 1 };
         c.mean = c.n ? c.mean * 0.8 + ratio * 0.2 : ratio;
@@ -563,6 +603,7 @@
     setsFor: setsFor, distribute: distribute, trimToTime: trimToTime,
     planExercise: planExercise, setTarget: setTarget, planSession: planSession,
     weekDone: weekDone, weekIndirect: weekIndirect, composeSets: composeSets, rankCands: rankCands, prefRank: prefRank, availableList: availableList, uniqueVariants: uniqueVariants, interleaveSubs: interleaveSubs, restSeconds: restSeconds, restStats: restStats, isAvailable: isAvailable,
+    fatigueLoad: fatigueLoad, fatMult: fatMult, fatPlan: fatPlan, FAT_K: FAT_K,
     updateLearning: updateLearning, seedLearn: seedLearn, expectedRpe: expectedRpe
   };
 });

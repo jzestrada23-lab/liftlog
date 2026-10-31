@@ -1,8 +1,8 @@
 (function () {
   'use strict';
   var E = Engine, D = Data;
-  var APP_VERSION = '2.4';
-  var APP_BUILD = '2026-10-29';
+  var APP_VERSION = '2.5';
+  var APP_BUILD = '2026-10-31';
   var KEY = 'liftlog.v1';
   var TYPES = ['Push', 'Pull', 'Legs', 'Upper', 'Lower'];
   var FED = { fasted: 'Fasted', light: 'Light meal', fed: 'Fed' };
@@ -24,7 +24,7 @@
       v: 2,
       settings: { g: 0.005, timeCap: 60, garageBench: true, restTimer: true, restSound: true, name: 'Jesse', muscleCfg: clone(D.MUSCLE_CFG) },
       sessions: sessions, custom: [], learned: learned, current: null,
-      goals: { week: '', list: [], dismissed: [] }, greet: { key: '', id: null, head: '', line: '', seen: [] }
+      templates: {}, goals: { week: '', list: [], dismissed: [] }, greet: { key: '', id: null, head: '', line: '', seen: [] }
     };
   }
   function migrate(s) {
@@ -64,6 +64,7 @@
     s.custom = s.custom || [];
     s.learned = Object.assign({ k: {}, ctx: {}, d2: {}, unavail: {} }, s.learned || {});
     if (s.current === undefined) s.current = null;
+    s.templates = s.templates || {};
     s.goals = s.goals || d.goals;
     s.greet = s.greet || d.greet;
     return s;
@@ -86,12 +87,12 @@
     var el = document.createElement('div');
     el.className = 'splash';
     el.setAttribute('role', 'status');
-    el.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;z-index:100;background:#14171b;color:#e9e6dd;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;font:16px -apple-system,system-ui,sans-serif;text-align:center;padding:24px';
-    el.innerHTML = '<div style="font-size:34px;font-weight:700;letter-spacing:-0.01em">LiftLog</div>' +
+    el.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;z-index:100;background:#0d0f12;color:#e8eaee;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;font:500 16px Manrope,-apple-system,system-ui,sans-serif;text-align:center;padding:24px';
+    el.innerHTML = '<div style="font-size:34px;font-weight:700;letter-spacing:-0.03em">LiftLog</div>' +
       '<div style="font-size:18px;font-variant-numeric:tabular-nums">Version ' + APP_VERSION + '</div>' +
-      '<div style="font-size:13px;color:#8d95a1">Build ' + APP_BUILD + '</div>' +
-      '<div class="splash-status" style="font-size:14px;color:#8d95a1;margin-top:18px;min-height:20px">Checking for updates…</div>' +
-      '<button class="splash-go" style="display:none;margin-top:8px;min-height:48px;padding:0 24px;border-radius:12px;background:#4c8dd6;color:#fff;font:600 17px -apple-system,system-ui,sans-serif;border:0">Continue</button>';
+      '<div style="font-size:13px;color:#6b7280">Build ' + APP_BUILD + '</div>' +
+      '<div class="splash-status" style="font-size:14px;color:#9aa1ac;margin-top:18px;min-height:20px">Checking for updates…</div>' +
+      '<button class="splash-go" style="display:none;margin-top:8px;min-height:48px;padding:0 24px;border-radius:12px;background:#7cc4d6;color:#0b1d22;font:700 16px Manrope,-apple-system,system-ui,sans-serif;border:0">Continue</button>';
     document.body.appendChild(el);
     var status = el.querySelector('.splash-status'), go = el.querySelector('.splash-go');
     var closed = false, hold = false, minDone = false, checked = false;
@@ -155,13 +156,14 @@
     return out;
   }
 
-  function histOf(id, excludeId) {
+  function histOf(id, excludeId, raw) {
     var out = [];
     S.sessions.forEach(function (s) {
       if (s.id === excludeId) return;
       (s.exercises || []).forEach(function (e) {
         if (e.exId !== id || e.skipped) return;
         var sets = e.sets.filter(function (x) { return x.done; });
+        if (!raw && e.fatMult && e.fatMult < 1) sets = sets.map(function (x) { var y = Object.assign({}, x); if (Number(y.w) > 0) y.w = Number(y.w) / e.fatMult; return y; });
         if (sets.length) out.push({ date: s.date, sets: sets });
       });
     });
@@ -201,7 +203,26 @@
     var t = E.setTarget(plan, sets, 0);
     if (plan.mode === 'bw') sets[0].w = plan.w;
     else if (t && t.w != null) sets[0].w = t.w;
-    return { exId: ex.id, name: ex.name, muscle: ex.muscle, plan: plan, sets: sets, note: '', swappedFrom: null, skipped: false };
+    return { exId: ex.id, name: ex.name, muscle: ex.muscle, plan: plan, planBase: clone(plan), prefW: sets[0].w, sets: sets, note: '', swappedFrom: null, skipped: false };
+  }
+
+  function refreshFatigue() {
+    var cur = S.current;
+    if (!cur || !cur.blocks) return;
+    var byId = libById(), all = flat(cur);
+    all.forEach(function (ex) {
+      if (ex.skipped || ex.sets.some(function (q) { return q.done; })) return;
+      if (!ex.planBase) ex.planBase = clone(ex.plan);
+      var prior = all.filter(function (o) { return o !== ex; }).map(function (o) { return { exId: o.exId, muscle: o.muscle, n: o.sets.filter(function (q) { return q.done; }).length }; });
+      var n = E.fatigueLoad(ex, prior, byId);
+      var fk = S.learned.fatK && S.learned.fatK[ex.muscle];
+      var mult = E.fatMult(n, fk ? fk.k : null);
+      ex.fatN = n; ex.fatMult = mult;
+      ex.plan = E.fatPlan(ex.planBase, mult);
+      var t = E.setTarget(ex.plan, ex.sets, 0);
+      var nw = ex.plan.mode === 'bw' ? ex.plan.w : (t && t.w != null ? t.w : '');
+      if (String(ex.sets[0].w) === String(ex.prefW)) { ex.sets[0].w = nw; ex.prefW = nw; }
+    });
   }
 
   function defaultLoc() { var d = new Date().getDay(); return d === 0 || d === 6 ? 'garage' : 'gym'; }
@@ -220,6 +241,8 @@
   }
 
   function planFor(st) {
+    var tpl = S.templates && S.templates[st.type];
+    if (tpl && tpl.blocks && tpl.blocks.length) return planFromTemplate(st, tpl);
     return E.planSession({
       template: D.SESSIONS[st.type], lib: lib(), location: st.loc, settings: S.settings,
       muscleCfg: S.settings.muscleCfg, weekDone: weekDoneNow(false), again: st.again,
@@ -239,7 +262,12 @@
       blocks: plan.blocks.map(function (b) {
         return {
           id: b.id, name: b.name, startedAt: null,
-          exercises: b.items.map(function (it) { return makeEx(it.ex, it.sets, ckey, st.loc, now); })
+          exercises: b.items.map(function (it) {
+            var e = makeEx(it.ex, it.sets, ckey, st.loc, now);
+            if (it.slotId) e.slotId = it.slotId;
+            if (it.subFrom) e.swappedFrom = it.subFrom;
+            return e;
+          })
         };
       })
     };
@@ -398,20 +426,25 @@
 
   var lastRoute = null;
   function render() {
+    refreshFatigue();
     var h = route();
     var keep = h === lastRoute ? window.scrollY : 0;
     lastRoute = h;
     var parts = h.replace('#/', '').split('/');
     var html;
+    var tab = null;
     switch (parts[0]) {
-      case 'start': html = vStart(); break;
+      case 'start': html = vStart(); tab = 'start'; break;
+      case 'builder': html = vBuilder(parts[1] ? decodeURIComponent(parts[1]) : null); tab = 'builder'; break;
+      case 'progress': html = vProgress(); tab = 'progress'; break;
       case 'session': html = vSession(); break;
       case 'block': html = vBlock(Number(parts[1])); break;
-      case 'summary': html = vSummary(parts[1]); break;
-      case 'settings': html = vSettings(); break;
-      default: html = vHome();
+      case 'summary': html = vSummary(parts[1]); tab = 'progress'; break;
+      case 'settings': html = vSettings(); tab = 'settings'; break;
+      default: html = vHome(); tab = 'home';
     }
-    $app.innerHTML = html;
+    document.body.classList.toggle('has-tabs', !!tab);
+    $app.innerHTML = html + (tab ? tabBar(tab) : '');
     window.scrollTo(0, keep);
   }
   function scrollToOpen() {
@@ -444,7 +477,7 @@
   }
 
   function exSeries(id) {
-    return histOf(id).filter(function (h) { return h.date; }).map(function (h) { return { date: h.date, E: E.bestE(h.sets) }; })
+    return histOf(id, null, true).filter(function (h) { return h.date; }).map(function (h) { return { date: h.date, E: E.bestE(h.sets) }; })
       .filter(function (p) { return p.E; });
   }
 
@@ -517,10 +550,18 @@
     return facts;
   }
 
+  function transitionLine() {
+    var g = [];
+    S.sessions.forEach(function (s) { flat(s).forEach(function (e) { e.sets.forEach(function (q) { if (q.gapPrev > 0 && q.gapPrev < 1200) g.push(q.gapPrev); }); }); });
+    if (g.length < 3) return '';
+    g.sort(function (x, y) { return x - y; });
+    var m = Math.round(g[Math.floor(g.length / 2)] / 15) * 15;
+    return '<p class="mute small" style="margin-top:10px">Between exercises: <b class="num">' + Math.floor(m / 60) + ':' + (m % 60 < 10 ? '0' : '') + (m % 60) + '</b> median, ' + g.length + ' switches. Includes the first set of the next exercise.</p>';
+  }
   function restCard() {
     var st = E.restStats(S.sessions);
     var h = '<div class="section"><h2>Rest and output</h2>';
-    if (st.pairs < 6) return h + '<p class="mute small">Appears after about 6 timed rests. Log sets right after you finish them.</p></div>';
+    if (st.pairs < 6) return h + '<p class="mute small">Appears after about 6 timed rests. Log sets right after you finish them.</p>' + transitionLine() + '</div>';
     h += '<p class="mute small" style="margin-bottom:8px">How much strength you kept on the next set, by rest length. Higher is better. Based on ' + st.pairs + ' rests.</p><div class="facts">';
     st.buckets.forEach(function (b) {
       h += '<li><span>' + esc(b.label) + '</span> <b style="float:right">' + (b.n >= 4 ? Math.round(b.ret * 100) + '% · ' + b.n + ' sets' : b.n + ' sets, need 4') + '</b></li>';
@@ -539,7 +580,7 @@
       });
       h += '</div>';
     }
-    return h + '</div>';
+    return h + transitionLine() + '</div>';
   }
 
   /* ---------- Home: greeting, goals, body map ---------- */
@@ -558,7 +599,73 @@
     if (!S.goals || S.goals.week !== wk) { S.goals = { week: wk, list: [], dismissed: [] }; save(); }
     return S.goals;
   }
-  function greetCard(o) {
+  /* ---------- Shared UI pieces ---------- */
+  var TAB_IC = {
+    home: '<path d="M4 10.5 12 4l8 6.5V20h-5.5v-5.5h-5V20H4z"/>',
+    start: '<circle cx="12" cy="12" r="8.5"/><path d="M10 8.6v6.8l5.4-3.4z" fill="currentColor" stroke="none"/>',
+    builder: '<rect x="4" y="4.5" width="16" height="4" rx="1.4"/><rect x="4" y="10" width="16" height="4" rx="1.4"/><rect x="4" y="15.5" width="10" height="4" rx="1.4"/>',
+    progress: '<path d="M4 19h16M7 16v-5M12 16V6M17 16v-8"/>',
+    settings: '<circle cx="12" cy="12" r="3"/><path d="M12 3.5v2.2M12 18.3v2.2M3.5 12h2.2M18.3 12h2.2M6 6l1.6 1.6M16.4 16.4 18 18M6 18l1.6-1.6M16.4 7.6 18 6"/>'
+  };
+  var TABS = [['home', 'Home'], ['start', 'Start'], ['builder', 'Builder'], ['progress', 'Progress'], ['settings', 'Settings']];
+  function tabBar(cur) {
+    return '<nav class="tabbar" aria-label="Main">' + TABS.map(function (t) {
+      return '<button class="tab' + (t[0] === cur ? ' on' : '') + '" data-go="#/' + t[0] + '"' + (t[0] === cur ? ' aria-current="page"' : '') + '>' +
+        '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + TAB_IC[t[0]] + '</svg><span>' + t[1] + '</span></button>';
+    }).join('') + '</nav>';
+  }
+  function pageHead(title, sub) {
+    return '<header class="phead"><h1>' + esc(title) + '</h1>' + (sub ? '<p class="psub">' + sub + '</p>' : '') + '</header>';
+  }
+  function ring(p) {
+    var v = Math.max(2, Math.min(100, p || 0));
+    return '<svg class="ring" viewBox="0 0 40 40" aria-hidden="true"><circle cx="20" cy="20" r="16" class="ring-bg"/><circle cx="20" cy="20" r="16" class="ring-fg" stroke-dasharray="' + (v / 100 * 100.5).toFixed(1) + ' 200" transform="rotate(-90 20 20)"/></svg>';
+  }
+  function isoWeek(d) {
+    var t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+    var day = t.getUTCDay() || 7;
+    t.setUTCDate(t.getUTCDate() + 4 - day);
+    var y0 = new Date(Date.UTC(t.getUTCFullYear(), 0, 1));
+    return Math.ceil(((t - y0) / 86400000 + 1) / 7);
+  }
+  function newId() { return 'x' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+
+  /* ---------- Home ---------- */
+  var BODY_SLIDES = ['Upper', 'Legs'];
+  var ANAT_PAL = { base: '#8a6a66', passive: '#5c4b4a', tendon: '#d8cfbf', deep: '#2a2526' };
+  var ARM_CHIPS = [['bi_long', 'Bi long'], ['bi_short', 'Bi short'], ['tri_long', 'Tri long'], ['tri_lat', 'Tri lat'], ['forearms', 'Forearm']];
+  function bodySlide() { return (((ui.bodySlide || 0) % 2) + 2) % 2; }
+  function regionStates(o) { return Coach.regionState(o.sessions, o.cfg, D.MUSCLE_LABEL, o.now, D.GLUTE); }
+  function bodyCard(o) {
+    var rs = regionStates(o), st = {};
+    Object.keys(rs).forEach(function (k) {
+      var hh = Body.heat(rs[k].days);
+      st[k] = { pct: rs[k].pct, fill: hh.on ? hh.fill : null };
+    });
+    var i = bodySlide();
+    var figs = i === 0 ? [Anatomy.UPPER_FRONT, Anatomy.UPPER_BACK] : [Anatomy.LEG_FRONT, Anatomy.LEG_BACK];
+    var names = i === 0 ? ['Upper body, front', 'Upper body, back'] : ['Legs, front', 'Legs, back'];
+    var h = '<section class="card map"><div class="body-wrap anat-slide">' + figs.map(function (f, k) { return Anatomy.figure(f, st, ANAT_PAL, { label: names[k] }); }).join('') + '</div>';
+    if (i === 0) {
+      h += '<div class="armchips">' + ARM_CHIPS.map(function (c) {
+        var x = rs[c[0]] || {}, hh = Body.heat(x.days);
+        return '<button class="achip" data-region="' + c[0] + '"><i style="background:' + (hh.on ? hh.fill : 'var(--line)') + '"></i>' + c[1] + ' <b>' + Math.round(x.pct || 0) + '%</b></button>';
+      }).join('') + '</div>';
+    }
+    h += '<div class="mapnav"><div class="seg2" role="tablist">' + BODY_SLIDES.map(function (n, k) {
+      return '<button role="tab" aria-selected="' + (k === i) + '" class="' + (k === i ? 'on' : '') + '" data-act="body-go" data-v="' + k + '">' + n + '</button>';
+    }).join('') + '</div>' + legendMini() + '</div></section>';
+    return h;
+  }
+  function legendMini() {
+    var stops = [0, 1, 2, 3, 4, 5, 6, 7].map(function (d) { return Body.heat(d).fill; });
+    return '<div class="legend"><span>0d</span><i style="background:linear-gradient(90deg,' + stops.join(',') + ')"></i><span>7d+</span></div>';
+  }
+  function statsRow(o) {
+    var c = Coach.buildCtx(o);
+    return '<section class="stats"><div><div class="k">Week</div><div class="n">' + c.weekPct + '%</div></div><div><div class="k">Sessions</div><div class="n">' + c.sessionsWeek + '</div></div><div><div class="k">Sets left</div><div class="n">' + c.setsLeft + '</div></div></section>';
+  }
+  function greetBlock(o) {
     var c = Coach.buildCtx(o);
     var key = new Date().toDateString() + '|' + c.period + '|' + S.sessions.length + '|' + (S.current ? 1 : 0) + '|' + (S.settings.name || '');
     var g = S.greet;
@@ -568,94 +675,82 @@
       S.greet = g = { key: key, id: pick.id, head: pick.head, line: pick.line, seen: seen };
       save();
     }
-    return '<div class="greet"><div class="g-head">' + esc(g.head) + '</div><div class="g-line">' + esc(g.line) + '</div></div>';
+    var now = new Date();
+    return '<header class="hello"><div class="dateline"><span>' + esc(now.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })) + '</span><span>Week ' + isoWeek(now) + '</span></div>' +
+      '<h1>' + esc(g.head) + '</h1><p class="psub">' + esc(g.line) + '</p></header>';
   }
-  function goalsCard(o) {
+  function goalsBlock(o) {
     var gs = goalsState();
     var sug = Coach.suggestGoals(o);
     var accepted = {};
     gs.list.forEach(function (g) { accepted[g.id] = true; });
     var offers = sug.goals.filter(function (g) { return !accepted[g.id] && gs.dismissed.indexOf(g.id) < 0; }).slice(0, 3);
-    var h = '<div class="section"><h2>Goals this week</h2>';
-    if (!gs.list.length && !offers.length) h += '<p class="mute small">No goal needed right now. Nothing in your data calls for one.</p>';
+    var h = '<section class="sec"><h2>Goals</h2>';
+    if (!gs.list.length && !offers.length) h += '<p class="mute small">No goal needed. Nothing in your data calls for one.</p>';
     gs.list.forEach(function (g) {
       var pr = Coach.goalProgress(g, o);
-      h += '<div class="goal' + (pr.done ? ' met' : '') + '"><div class="goal-top"><b>' + esc(g.title) + '</b><button class="ghost" data-act="goal-del" data-id="' + esc(g.id) + '" aria-label="Remove goal">Remove</button></div>' +
-        '<div class="track"><span class="fill" style="display:block;width:' + Math.round(pr.pct) + '%"></span></div>' +
-        '<div class="mute small">' + esc(pr.text) + (pr.done ? ' · done' : '') + '</div><div class="mute small ev">' + esc(g.evidence) + '</div></div>';
+      h += '<div class="goal' + (pr.done ? ' met' : '') + '">' + ring(pr.pct) + '<div class="gtxt"><div class="gt">' + esc(g.title) + '</div><div class="gs">' + esc(pr.done ? 'Done' : g.evidence) + '</div></div>' +
+        '<div class="gv num">' + esc(pr.text) + '</div><button class="gx" data-act="goal-del" data-id="' + esc(g.id) + '" aria-label="Remove goal">×</button></div>';
     });
     offers.forEach(function (g) {
-      h += '<div class="goal offer"><div class="goal-top"><b>' + esc(g.title) + '</b></div><div class="mute small ev">' + esc(g.evidence) + '</div>' +
-        '<div class="offer-btns"><button class="chip on" data-act="goal-add" data-id="' + esc(g.id) + '">Accept</button><button class="chip" data-act="goal-skip" data-id="' + esc(g.id) + '">Skip</button></div></div>';
+      h += '<div class="goal offer"><div class="gtxt"><div class="gt">' + esc(g.title) + '</div><div class="gs">' + esc(g.evidence) + '</div>' +
+        '<div class="offer-btns"><button class="pill on" data-act="goal-add" data-id="' + esc(g.id) + '">Accept</button><button class="pill" data-act="goal-skip" data-id="' + esc(g.id) + '">Skip</button></div></div></div>';
     });
     sug.notes.forEach(function (n) { h += '<p class="mute small note-line">' + esc(n) + '</p>'; });
-    return h + '</div>';
+    return h + '</section>';
   }
-  function armList(regs, st) {
-    return '<ul class="arm-list">' + regs.map(function (r) {
-      var x = st[r.id] || {};
-      return '<li data-region="' + r.id + '"><span>' + esc(r.lab) + '</span><span class="num">' + Math.round(x.pct || 0) + '%' + (x.days != null ? ' · ' + esc(Body.dayText(x.days)) : '') + '</span></li>';
-    }).join('') + '</ul>';
-  }
-  var BODY_SLIDES = ['Upper body', 'Arms', 'Legs'];
-  var ANAT_PAL = { base: '#8a6a66', passive: '#5f4c4a', tendon: '#d8cfbf', deep: '#3a2c2b' };
-  function bodySlide() { return (((ui.bodySlide || 0) % 3) + 3) % 3; }
-  function bodyCard(o) {
-    var rs = Coach.regionState(o.sessions, o.cfg, D.MUSCLE_LABEL, o.now), st = {};
-    Object.keys(rs).forEach(function (k) {
-      var hh = Body.heat(rs[k].days);
-      st[k] = { pct: rs[k].pct, fill: hh.on ? hh.fill : null };
-    });
-    var i = bodySlide();
-    var figs = i === 0 ? [Anatomy.UPPER_FRONT, Anatomy.UPPER_BACK] : i === 1 ? [Anatomy.ARM_ANT, Anatomy.ARM_LAT, Anatomy.ARM_POST] : [Anatomy.LEG_FRONT, Anatomy.LEG_BACK];
-    var names = i === 0 ? ['Upper body front', 'Upper body back'] : i === 1 ? ['Arm front', 'Arm side', 'Arm back'] : ['Legs front', 'Legs back'];
-    var h = '<div class="section"><h2>Body map</h2>';
-    h += '<div class="body-wrap anat-slide n' + figs.length + '">' + figs.map(function (f, k) { return Anatomy.figure(f, st, ANAT_PAL, { label: names[k] }); }).join('') + '</div>';
-    h += '<div class="anat-nav"><button class="anat-arrow" data-act="body-prev" aria-label="Previous view">‹</button><span class="anat-t">' + BODY_SLIDES[i] + '</span><span class="anat-dots">' +
-      [0, 1, 2].map(function (k) { return '<button class="anat-dot' + (k === i ? ' on' : '') + '" data-act="body-go" data-v="' + k + '" aria-label="' + BODY_SLIDES[k] + '"></button>'; }).join('') +
-      '</span><button class="anat-arrow" data-act="body-next" aria-label="Next view">›</button></div>';
-    h += Body.legend();
-    h += '<p class="mute small">Number is this week\'s sets as a share of target. Color is days since last trained. Swipe for arms and legs. Tap a muscle for detail.</p></div>';
+  function vHome() {
+    var o = coachOpts();
+    var h = greetBlock(o);
+    if (S.current) {
+      var c = flat(S.current).reduce(function (a, e) { a.n += e.skipped ? 0 : e.sets.length; a.d += e.sets.filter(function (q) { return q.done; }).length; return a; }, { n: 0, d: 0 });
+      h += '<button class="resume" data-go="#/session"><span><b>' + esc(S.current.type) + '</b> in progress</span><span class="num">' + c.d + ' / ' + c.n + ' sets ›</span></button>';
+    }
+    h += bodyCard(o);
+    h += statsRow(o);
+    h += goalsBlock(o);
+    var standalone = window.navigator.standalone || (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+    if (!standalone && /iPhone|iPad/.test(navigator.userAgent) && !localStorage.getItem('liftlog.tip')) {
+      h += '<div class="notice sec"><span>Install: Share, then Add to Home Screen.</span><button class="ghost" data-act="hide-tip">Hide</button></div>';
+    }
     return h;
   }
   function regionSheet(id) {
     var o = coachOpts();
-    var st = Coach.regionState(o.sessions, o.cfg, D.MUSCLE_LABEL, o.now);
+    var st = regionStates(o);
     var subs = st[id] && st[id].group ? st[id].group : [id];
     var title = st[id] ? st[id].label : id;
     var ws = E.weekStart(o.now).getTime();
     var h = '<h3>' + esc(title) + '</h3>';
     subs.forEach(function (m) {
       var x = st[m]; if (!x) return;
-      var names = {};
-      o.sessions.forEach(function (s) {
-        if (!s.date || ts(s.date) < ws) return;
-        (s.exercises || []).forEach(function (e) {
-          if (e.muscle !== m) return;
-          var n = e.sets.filter(function (q) { return q.done; }).length;
-          if (n) names[e.name] = (names[e.name] || 0) + n;
+      var list;
+      if (m === 'glutes') {
+        list = Object.keys(x.credit || {}).map(function (k) { return esc(k) + ' (' + fmt(Math.round(x.credit[k] * 10) / 10) + ')'; }).join(', ');
+      } else {
+        var names = {};
+        o.sessions.forEach(function (s) {
+          if (!s.date || ts(s.date) < ws) return;
+          (s.exercises || []).forEach(function (e) {
+            if (e.muscle !== m) return;
+            var n = e.sets.filter(function (q) { return q.done; }).length;
+            if (n) names[e.name] = (names[e.name] || 0) + n;
+          });
         });
-      });
-      var list = Object.keys(names).map(function (k) { return esc(k) + ' (' + names[k] + ')'; }).join(', ');
-      var last = x.lastDate ? esc(fmtDate(new Date(x.lastDate).toISOString())) + ', ' + esc(Coach.agoText(o.now.getTime() - x.lastDate)) : 'never logged in the app';
-      h += '<div class="rg">' + (subs.length > 1 ? '<b>' + esc(x.label) + '</b>' : '') + '<div class="mute small">' + x.done + ' of ' + x.target + ' sets this week</div>' +
-        '<div class="mute small">Last trained: ' + last + '</div>' +
-        '<div class="mute small">Counted this week: ' + (list || 'none yet') + '</div></div>';
+        list = Object.keys(names).map(function (k) { return esc(k) + ' (' + names[k] + ')'; }).join(', ');
+      }
+      var last = x.lastDate ? esc(fmtDate(new Date(x.lastDate).toISOString())) + ', ' + esc(Coach.agoText(o.now.getTime() - x.lastDate)) : 'Not logged yet';
+      h += '<div class="kv"><span>This week</span><b class="num">' + fmt(x.done) + ' / ' + x.target + ' sets' + (m === 'glutes' ? ' (rides with quads)' : '') + '</b></div>' +
+        '<div class="kv"><span>Last trained</span><b>' + last + '</b></div>' +
+        '<div class="kv"><span>Counted</span><b>' + (list || 'None yet') + '</b></div>';
+      if (m === 'glutes') h += '<p class="mute small" style="margin-top:8px">Hinges and split squats count 1 set. Squats, hack squats, and leg press count half.</p>';
     });
     h += '<div class="row-btns"><button class="btn secondary slim" data-act="close-sheet">Close</button></div>';
     openSheet(h);
   }
-  function homeTop() {
-    var o = coachOpts();
-    return greetCard(o) + goalsCard(o) + bodyCard(o);
-  }
-  function pinBar() {
-    return '<div class="pin">' + (S.current
-      ? '<button class="btn" data-go="#/session">Resume ' + esc(S.current.type) + ' session</button>'
-      : '<button class="btn" data-go="#/start">Start session</button>') + '</div>';
-  }
 
-  function vHome() {
+  /* ---------- Progress ---------- */
+  function vProgress() {
     var done = weekDoneNow(true);
     var byId = libById();
     var ids = Object.keys(byId).filter(function (id) { return exSeries(id).length >= 2; });
@@ -663,54 +758,258 @@
       ids.sort(function (a, b) { return exSeries(b).length - exSeries(a).length; });
       ui.chartEx = ids[0] || null;
     }
-    var recent = S.sessions.filter(function (s) { return !s.seed; }).sort(function (a, b) { return ts(b.date) - ts(a.date); }).slice(0, 8);
-
-    var h = '<div class="top"><h1>LiftLog</h1><button class="back" data-go="#/settings" aria-label="Settings">Settings</button></div>';
-    h += homeTop();
-    var standalone = window.navigator.standalone || (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
-    if (!standalone && /iPhone|iPad/.test(navigator.userAgent) && !localStorage.getItem('liftlog.tip')) {
-      h += '<div class="notice section"><span>Install: tap Share, then Add to Home Screen.</span><button class="ghost" data-act="hide-tip">Hide</button></div>';
-    }
-    h += '<div class="section"><h2>Notes from your data</h2><ul class="facts">' + coachFacts().map(function (f) { return '<li>' + f + '</li>'; }).join('') + '</ul></div>';
-    h += '<div class="section"><h2>Sets this week</h2>' + weekBars(done) + '</div>';
-    h += restCard();
-    h += '<div class="section"><h2>Estimated max</h2><div class="chart">';
+    var recent = S.sessions.filter(function (s) { return !s.seed; }).sort(function (a, b) { return ts(b.date) - ts(a.date); }).slice(0, 12);
+    var h = pageHead('Progress');
+    h += '<section class="sec"><h2>Estimated max</h2><div class="card chart">';
     if (ui.chartEx) {
       h += '<select data-act="chart-ex" aria-label="Exercise">' + ids.map(function (id) { return '<option value="' + id + '"' + (id === ui.chartEx ? ' selected' : '') + '>' + esc(byId[id].name) + '</option>'; }).join('') + '</select>' + chartSvg(exSeries(ui.chartEx));
-    } else {
-      h += '<p class="mute small">Charts appear after two dated sessions of the same exercise.</p>';
+    } else h += '<p class="mute small">Appears after two dated sessions of one exercise.</p>';
+    h += '</div></section>';
+    h += '<section class="sec"><h2>Sets this week</h2><div class="card pad">' + weekBars(done) + '</div></section>';
+    h += restCard();
+    h += '<section class="sec"><h2>Notes from your data</h2><ul class="facts">' + coachFacts().map(function (f) { return '<li>' + f + '</li>'; }).join('') + '</ul></section>';
+    h += '<section class="sec"><h2>Log</h2>';
+    if (!recent.length) h += '<p class="mute">Your first session shows up here.</p>';
+    else h += '<div class="hist">' + recent.map(function (s) {
+      var sets = flat(s).reduce(function (a, e) { return a + e.sets.filter(function (x) { return x.done; }).length; }, 0);
+      return '<button data-go="#/summary/' + s.id + '"><span><span class="t">' + esc(s.type) + '</span> <span class="mute small">' + esc(s.loc === 'garage' ? 'Garage' : 'Gym') + '</span></span><span class="mute num">' + esc(fmtDate(s.date)) + ' · ' + sets + ' sets</span></button>';
+    }).join('') + '</div>';
+    return h + '</section>';
+  }
+
+  /* ---------- Templates ---------- */
+  function tplFromPlan(plan) {
+    return {
+      blocks: plan.blocks.map(function (b) {
+        return { id: b.id, name: b.name, slots: b.items.map(function (it) { return { id: newId(), exId: it.ex.id, sets: it.sets, alts: [] }; }) };
+      })
+    };
+  }
+  function autoPlan(type, loc) {
+    return E.planSession({
+      template: D.SESSIONS[type], lib: lib(), location: loc || 'gym', settings: S.settings,
+      muscleCfg: S.settings.muscleCfg, weekDone: {}, again: 'unsure',
+      learned: S.learned, now: new Date(), timeCap: S.settings.timeCap,
+      hasHist: function (id) { return histOf(id).length > 0; }
+    });
+  }
+  function planFromTemplate(st, tpl) {
+    var byId = libById(), total = 0;
+    var hasHist = function (id) { return histOf(id).length > 0; };
+    var blocks = tpl.blocks.map(function (b) {
+      var items = b.slots.map(function (sl) {
+        var ex = byId[sl.exId], subFrom = null;
+        if (!ex || !E.isAvailable(ex, st.loc, S.settings)) {
+          var alt = (sl.alts || []).map(function (id) { return byId[id]; }).filter(function (x) { return x && E.isAvailable(x, st.loc, S.settings); })[0];
+          if (!alt && ex) alt = E.rankCands(E.availableList(lib(), ex.muscle, st.loc, S.settings, S.learned.unavail, new Date()), hasHist)[0];
+          if (!alt) return null;
+          subFrom = ex ? ex.name : null;
+          ex = alt;
+        }
+        var n = sl.sets + ((st.adds || {})[sl.id] || 0);
+        total += n;
+        return { ex: ex, sets: n, slotId: sl.id, subFrom: subFrom };
+      }).filter(Boolean);
+      return { id: b.id, name: b.name, items: items };
+    });
+    return { blocks: blocks, totalSets: total, minutes: Math.round(total * 3.2), fromTemplate: true };
+  }
+  function shortfalls(st, plan) {
+    var done = weekDoneNow(false), planned = {}, slot = {};
+    plan.blocks.forEach(function (b) {
+      b.items.forEach(function (it) {
+        var m = it.ex.muscle;
+        planned[m] = (planned[m] || 0) + it.sets - ((st.adds || {})[it.slotId] || 0);
+        if (!slot[m]) slot[m] = it;
+      });
+    });
+    var factor = st.again === 'yes' ? 2 : st.again === 'no' ? 1 : 1.5;
+    var out = [];
+    Object.keys(planned).forEach(function (m) {
+      var cfg = S.settings.muscleCfg[m];
+      if (!cfg) return;
+      var need = Math.ceil(Math.max(0, cfg.target - (done[m] || 0)) / factor);
+      var add = Math.min(3, need - planned[m]);
+      if (add >= 1) out.push({ m: m, slotId: slot[m].slotId, name: slot[m].ex.name, add: add, have: (done[m] || 0) + planned[m], target: cfg.target });
+    });
+    out.sort(function (x, y) { return (x.have / x.target) - (y.have / y.target); });
+    return out.slice(0, 3);
+  }
+  function vBuilder(type) {
+    if (type) return vTemplate(type);
+    var h = pageHead('Builder', 'Your structure. LiftLog fills in weights and reps.');
+    h += '<div class="list">';
+    TYPES.forEach(function (t) {
+      var tpl = S.templates[t];
+      var n = tpl ? tpl.blocks.reduce(function (a, b) { return a + b.slots.reduce(function (x, s) { return x + s.sets; }, 0); }, 0) : 0;
+      var ex = tpl ? tpl.blocks.reduce(function (a, b) { return a + b.slots.length; }, 0) : 0;
+      h += '<button class="row" data-go="#/builder/' + t + '"><span><b>' + t + '</b><span class="rs">' + (tpl ? ex + ' exercises · ' + n + ' sets' : 'Auto') + '</span></span><span class="tag' + (tpl ? ' own' : '') + '">' + (tpl ? 'Yours' : 'Auto') + '</span></button>';
+    });
+    return h + '</div>';
+  }
+  function slotLast(exId) {
+    var hh = histOf(exId, null, true);
+    if (!hh.length) return 'New';
+    var s1 = hh[hh.length - 1].sets[0];
+    return s1 ? fmt(s1.w) + ' × ' + s1.r : '';
+  }
+  function vTemplate(type) {
+    if (TYPES.indexOf(type) < 0) return pageHead('Not found');
+    var tpl = S.templates[type];
+    var h = '<div class="top"><button class="back" data-go="#/builder">‹ Builder</button></div>' + pageHead(type);
+    if (!tpl) {
+      var plan = autoPlan(type, 'gym');
+      h += '<p class="psub" style="margin-bottom:14px">LiftLog builds this from your weekly gaps. Make it yours to set the exercises, order, and sets.</p><div class="list">';
+      plan.blocks.forEach(function (b) {
+        h += '<div class="card pad"><h3>' + esc(b.name) + '</h3>' + b.items.map(function (it) { return '<div class="sl-ro"><span>' + esc(it.ex.name) + '</span><span class="num mute">' + it.sets + '</span></div>'; }).join('') + '</div>';
+      });
+      return h + '</div><div class="row-btns"><button class="btn" data-act="tpl-make" data-t="' + type + '">Make it mine</button></div>';
     }
-    h += '</div></div>';
-    h += '<div class="section"><h2>Logged sessions</h2>';
-    if (!recent.length) h += '<p class="mute">None yet. Your first session shows up here.</p>';
-    else {
-      h += '<div class="hist">' + recent.map(function (s) {
-        var sets = flat(s).reduce(function (a, e) { return a + e.sets.filter(function (x) { return x.done; }).length; }, 0);
-        return '<button data-go="#/summary/' + s.id + '"><span><span class="t">' + esc(s.type) + '</span> <span class="mute small">' + esc(s.loc === 'garage' ? 'Garage' : 'Gym') + '</span></span><span class="mute num">' + esc(fmtDate(s.date)) + ' · ' + sets + ' sets</span></button>';
-      }).join('') + '</div>';
+    var byId = libById();
+    h += '<div class="list">';
+    tpl.blocks.forEach(function (b, bk) {
+      h += '<div class="card tblk"><div class="tb-head"><button class="tb-name" data-act="blk-ren" data-t="' + type + '" data-bk="' + bk + '">' + esc(b.name) + '</button><span class="tb-tools">' +
+        (bk > 0 ? '<button class="ib" data-act="blk-up" data-t="' + type + '" data-bk="' + bk + '" aria-label="Move block up">↑</button>' : '') +
+        '<button class="ib" data-act="blk-del" data-t="' + type + '" data-bk="' + bk + '" aria-label="Delete block">×</button></span></div>';
+      b.slots.forEach(function (sl, si) {
+        var ex = byId[sl.exId];
+        var key = 'data-t="' + type + '" data-bk="' + bk + '" data-sl="' + si + '"';
+        h += '<div class="slot"><button class="sl-name" data-act="sl-swap" ' + key + '><span>' + esc(ex ? ex.name : sl.exId) + '</span><span class="sl-sub">' + esc(slotLast(sl.exId)) + (sl.alts && sl.alts.length ? ' · ' + sl.alts.length + ' saved' : '') + '</span></button>' +
+          '<div class="step"><button class="ib" data-act="sl-dec" ' + key + ' aria-label="Fewer sets">−</button><span class="num">' + sl.sets + '</span><button class="ib" data-act="sl-inc" ' + key + ' aria-label="More sets">+</button></div>' +
+          '<div class="sl-tools">' + (si > 0 ? '<button class="ib" data-act="sl-up" ' + key + ' aria-label="Move up">↑</button>' : '<span class="ib off"></span>') +
+          '<button class="ib" data-act="sl-del" ' + key + ' aria-label="Remove">×</button></div></div>';
+      });
+      h += '<button class="addrow" data-act="sl-add" data-t="' + type + '" data-bk="' + bk + '">+ Exercise</button></div>';
+    });
+    h += '</div><div class="row-btns"><button class="btn secondary slim" data-act="blk-add" data-t="' + type + '">+ Block</button>' +
+      '<button class="btn danger slim" data-act="tpl-reset" data-t="' + type + '">Back to auto</button></div>';
+    return h;
+  }
+  function tplPicker(type, bk, si) {
+    var tpl = S.templates[type], b = tpl.blocks[bk], sl = si >= 0 ? b.slots[si] : null;
+    var byId = libById();
+    var cur = sl ? byId[sl.exId] : null;
+    var muscle = cur ? cur.muscle : (b.slots[0] && byId[b.slots[0].exId] ? byId[b.slots[0].exId].muscle : null);
+    var used = {};
+    b.slots.forEach(function (x) { used[x.exId] = true; });
+    var hasHist = function (id) { return histOf(id).length > 0; };
+    var key = 'data-t="' + type + '" data-bk="' + bk + '" data-sl="' + si + '"';
+    var h = '<h3>' + (sl ? 'Swap ' + esc(cur ? cur.name : '') : 'Add exercise') + '</h3>';
+    var alts = sl ? (sl.alts || []).filter(function (id) { return byId[id] && id !== sl.exId; }) : [];
+    if (alts.length) {
+      h += '<p class="opt-h">Used in this slot</p>' + alts.map(function (id) { return '<button class="opt" data-act="tpl-pick" data-id="' + esc(id) + '" ' + key + '><span>' + esc(byId[id].name) + '</span><span class="sm">' + esc(slotLast(id)) + '</span></button>'; }).join('');
     }
-    return h + '</div>' + pinBar();
+    var pool = ui.pickAll || !muscle ? lib() : lib().filter(function (e) { return e.muscle === muscle; });
+    pool = E.rankCands(pool.filter(function (e) { return !used[e.id] && alts.indexOf(e.id) < 0; }), hasHist);
+    if (ui.pickAll) pool.sort(function (a, b2) { return (D.MUSCLE_LABEL[a.muscle] || '').localeCompare(D.MUSCLE_LABEL[b2.muscle] || ''); });
+    h += '<p class="opt-h">' + (ui.pickAll || !muscle ? 'All exercises' : esc(D.MUSCLE_LABEL[muscle])) + '</p>';
+    h += pool.map(function (e) { return '<button class="opt" data-act="tpl-pick" data-id="' + esc(e.id) + '" ' + key + '><span>' + esc(e.name) + '</span><span class="sm">' + (ui.pickAll ? esc(D.MUSCLE_LABEL[e.muscle] || '') + ' · ' : '') + esc(slotLast(e.id)) + '</span></button>'; }).join('');
+    if (muscle) h += '<button class="opt" data-act="tpl-all" ' + key + '><span>' + (ui.pickAll ? 'Only ' + esc(D.MUSCLE_LABEL[muscle].toLowerCase()) : 'Show all muscles') + '</span></button>';
+    h += '<div class="row-btns"><button class="btn secondary slim" data-act="close-sheet">Cancel</button></div>';
+    openSheet(h);
+  }
+  function saveSessionToTemplate() {
+    var cur = S.current, old = S.templates[cur.type], oldSlots = {};
+    if (old) old.blocks.forEach(function (b) { b.slots.forEach(function (sl) { oldSlots[sl.id] = sl; }); });
+    S.templates[cur.type] = {
+      blocks: cur.blocks.map(function (b) {
+        return {
+          id: b.id, name: b.name, slots: b.exercises.filter(function (e) { return !e.skipped; }).map(function (e) {
+            var sl = e.slotId && oldSlots[e.slotId];
+            var alts = sl && sl.alts ? sl.alts.slice() : [];
+            [sl && sl.exId, e.origExId].forEach(function (id) { if (id && id !== e.exId && alts.indexOf(id) < 0) alts.unshift(id); });
+            alts = alts.filter(function (id) { return id !== e.exId; }).slice(0, 5);
+            return { id: e.slotId || newId(), exId: e.exId, sets: Math.max(1, e.sets.filter(function (q) { return !q.extra; }).length), alts: alts };
+          })
+        };
+      }).filter(function (b) { return b.slots.length; })
+    };
+    save();
+    toast('Saved to ' + cur.type + ' template.');
+  }
+  function tplAction(a, el) {
+    var type = el.dataset.t, bk = Number(el.dataset.bk), si = Number(el.dataset.sl);
+    var tpl = S.templates[type];
+    var b = tpl && tpl.blocks[bk], sl = b && b.slots[si];
+    switch (a) {
+      case 'tpl-make': S.templates[type] = tplFromPlan(autoPlan(type, 'gym')); break;
+      case 'tpl-reset':
+        if (!window.confirm('Go back to auto for ' + type + '? Your exercise history stays.')) return;
+        delete S.templates[type]; break;
+      case 'sl-inc': sl.sets = Math.min(8, sl.sets + 1); break;
+      case 'sl-dec': sl.sets = Math.max(1, sl.sets - 1); break;
+      case 'sl-up': if (si > 0) { b.slots.splice(si - 1, 0, b.slots.splice(si, 1)[0]); } break;
+      case 'sl-del': b.slots.splice(si, 1); break;
+      case 'blk-up': if (bk > 0) tpl.blocks.splice(bk - 1, 0, tpl.blocks.splice(bk, 1)[0]); break;
+      case 'blk-del':
+        if (b.slots.length && !window.confirm('Delete ' + b.name + ' and its exercises?')) return;
+        tpl.blocks.splice(bk, 1); break;
+      case 'blk-add': tpl.blocks.push({ id: newId(), name: 'New block', slots: [] }); break;
+      case 'blk-ren': {
+        var nm = window.prompt('Block name', b.name);
+        if (nm && nm.trim()) b.name = nm.trim().slice(0, 30);
+        break;
+      }
+      case 'sl-swap': ui.pickAll = false; return tplPicker(type, bk, si);
+      case 'sl-add': ui.pickAll = false; return tplPicker(type, bk, -1);
+      case 'tpl-all': ui.pickAll = !ui.pickAll; return tplPicker(type, bk, si);
+      case 'tpl-pick': {
+        var id = el.dataset.id;
+        if (si >= 0 && sl) {
+          var alts = (sl.alts || []).filter(function (x) { return x !== id; });
+          if (alts.indexOf(sl.exId) < 0) alts.unshift(sl.exId);
+          sl.alts = alts.slice(0, 5);
+          sl.exId = id;
+        } else b.slots.push({ id: newId(), exId: id, sets: 3, alts: [] });
+        closeSheet();
+        break;
+      }
+    }
+    save(); render();
   }
 
   function vStart() {
-    if (!ui.start) ui.start = { type: suggestType(), loc: defaultLoc(), fed: defaultFed(), again: 'unsure' };
+    if (S.current) {
+      var c = flat(S.current).reduce(function (a, e) { a.n += e.skipped ? 0 : e.sets.length; a.d += e.sets.filter(function (q) { return q.done; }).length; return a; }, { n: 0, d: 0 });
+      return pageHead('Start') + '<div class="card pad"><h3>' + esc(S.current.type) + ' in progress</h3><p class="mute small num" style="margin-top:4px">' + c.d + ' of ' + c.n + ' sets · started ' + esc(fmtTime(S.current.date)) + '</p></div>' +
+        '<div class="row-btns"><button class="btn" data-go="#/session">Resume</button></div>';
+    }
+    if (!ui.start) ui.start = { type: suggestType(), loc: defaultLoc(), fed: defaultFed(), again: 'unsure', adds: {} };
     var st = ui.start;
+    st.adds = st.adds || {};
     var now = new Date();
     var plan = planFor(st);
-    var h = topBar('New session', '#/home', 'Home');
-    h += '<p class="mute">' + esc(now.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })) + ', ' + esc(fmtTime(now.toISOString())) + ' · ' + esc(BUCKET[E.timeBucket(now)]) + '</p>';
-    h += '<div class="field-label">Session</div><div class="seg">' + TYPES.map(function (t) { return '<button class="' + (st.type === t ? 'on' : '') + '" data-act="st-type" data-v="' + t + '">' + t + '</button>'; }).join('') + '</div>';
-    h += '<div class="field-label">Location</div><div class="seg"><button class="' + (st.loc === 'gym' ? 'on' : '') + '" data-act="st-loc" data-v="gym">Gym</button><button class="' + (st.loc === 'garage' ? 'on' : '') + '" data-act="st-loc" data-v="garage">Garage</button></div>';
-    h += '<div class="field-label">Food</div><div class="seg">' + Object.keys(FED).map(function (k) { return '<button class="' + (st.fed === k ? 'on' : '') + '" data-act="st-fed" data-v="' + k + '">' + FED[k] + '</button>'; }).join('') + '</div>';
-    h += '<div class="field-label">Training this again this week?</div><div class="seg">' + Object.keys(AGAIN).map(function (k) { return '<button class="' + (st.again === k ? 'on' : '') + '" data-act="st-again" data-v="' + k + '">' + AGAIN[k] + '</button>'; }).join('') + '</div>';
-    h += '<div class="section"><h2>Plan</h2><p class="mute small" style="margin-bottom:10px">' + plan.totalSets + ' sets, about ' + plan.minutes + ' min. Targets adjust after your first set.</p><div class="list">';
+    var h = pageHead('Start', esc(now.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })) + ' · ' + esc(BUCKET[E.timeBucket(now)]));
+    h += '<div class="seg types" role="radiogroup" aria-label="Session">' + TYPES.map(function (t) { return '<button class="' + (st.type === t ? 'on' : '') + '" data-act="st-type" data-v="' + t + '">' + t + '</button>'; }).join('') + '</div>';
+    h += '<div class="fields">';
+    h += '<div class="field"><span>Where</span><div class="seg sm"><button class="' + (st.loc === 'gym' ? 'on' : '') + '" data-act="st-loc" data-v="gym">Gym</button><button class="' + (st.loc === 'garage' ? 'on' : '') + '" data-act="st-loc" data-v="garage">Garage</button></div></div>';
+    h += '<div class="field"><span>Food</span><div class="seg sm">' + Object.keys(FED).map(function (k) { return '<button class="' + (st.fed === k ? 'on' : '') + '" data-act="st-fed" data-v="' + k + '">' + FED[k] + '</button>'; }).join('') + '</div></div>';
+    h += '<div class="field"><span>Again this week?</span><div class="seg sm">' + Object.keys(AGAIN).map(function (k) { return '<button class="' + (st.again === k ? 'on' : '') + '" data-act="st-again" data-v="' + k + '">' + AGAIN[k] + '</button>'; }).join('') + '</div></div>';
+    h += '</div>';
+    h += '<section class="sec"><div class="sec-h"><h2>Plan</h2><span class="mute small num">' + plan.totalSets + ' sets · ~' + plan.minutes + ' min</span></div>';
+    h += '<p class="mute small" style="margin-bottom:10px">' + (plan.fromTemplate ? 'Your ' + esc(st.type) + ' template. ' : 'Auto plan. ') + '<button class="link" data-go="#/builder/' + st.type + '">Edit in Builder</button></p><div class="list">';
     plan.blocks.forEach(function (b) {
-      h += '<div class="card" style="padding:12px 14px"><h3>' + esc(b.name) + '</h3>';
-      if (!b.items.length) h += '<p class="mute small">Nothing available at this location.</p>';
-      b.items.forEach(function (it) { h += '<p class="mute small">' + esc(it.ex.name) + ' · ' + it.sets + ' sets</p>'; });
+      h += '<div class="card pad"><h3>' + esc(b.name) + '</h3>';
+      if (!b.items.length) h += '<p class="mute small">Nothing available here.</p>';
+      b.items.forEach(function (it) {
+        h += '<div class="sl-ro"><span>' + esc(it.ex.name) + (it.subFrom ? '<span class="mute small"> · for ' + esc(it.subFrom) + '</span>' : '') + '</span><span class="num mute">' + it.sets + '</span></div>';
+      });
       h += '</div>';
     });
-    h += '</div></div><div class="row-btns"><button class="btn" data-act="gen">Generate workout</button></div>';
+    h += '</div></section>';
+    if (plan.fromTemplate) {
+      var sf = shortfalls(st, plan);
+      if (sf.length) {
+        h += '<section class="sec"><h2>Short this week</h2><div class="list">';
+        sf.forEach(function (x) {
+          var on = !!st.adds[x.slotId];
+          h += '<div class="card sugg"><div><b>' + esc(D.MUSCLE_LABEL[x.m]) + '</b><div class="mute small num">' + x.have + ' of ' + x.target + ' after today</div></div>' +
+            '<button class="pill' + (on ? ' on' : '') + '" data-act="st-add" data-id="' + esc(x.slotId) + '" data-v="' + x.add + '">' + (on ? 'Added' : '+' + x.add + ' · ' + esc(x.name.replace(/\s*\(.*\)/, ''))) + '</button></div>';
+        });
+        h += '</div></section>';
+      }
+    }
+    h += '<div class="row-btns"><button class="btn" data-act="gen">Start workout</button></div>';
     return h;
   }
 
@@ -732,6 +1031,7 @@
     });
     h += '</div><div class="row-btns">';
     h += '<button class="btn' + (allDone ? '' : ' secondary') + '" data-act="finish">' + (allDone ? 'Finish session' : 'Finish early') + '</button>';
+    h += '<button class="btn secondary slim" data-act="save-tpl">Save structure to ' + esc(s.type) + ' template</button>';
     h += '<button class="btn danger slim" data-act="discard">Discard session</button></div>';
     return h;
   }
@@ -767,6 +1067,7 @@
       (open ? '' : '<span class="ex-sum">' + esc(exSummary(ex)) + '</span>') + '</button>';
     if (open) {
       h += '<div class="ex-body">';
+      if (ex.fatN > 0 && ex.fatMult < 1 && !ex.sets.some(function (q) { return q.done; })) h += '<p class="ex-fat">−' + Math.round((1 - ex.fatMult) * 100) + '% · ' + fmt(ex.fatN) + ' earlier ' + esc((D.MUSCLE_LABEL[ex.muscle] || ex.muscle).toLowerCase()) + ' sets</p>';
       if (ex.plan.note) h += '<p class="ex-note">' + esc(ex.plan.note) + (ex.plan.capped ? ' Dumbbells top out at 80 lb here.' : '') + '</p>';
       if (ex.swappedFrom) h += '<p class="sub">Swapped from ' + esc(ex.swappedFrom) + '.</p>';
       ex.sets.forEach(function (s, k) { h += setRow(bi, ei, k); });
@@ -830,8 +1131,13 @@
     s.w = w; s.r = r; s.done = true; s.at = new Date().toISOString();
     var next = ex.sets[k + 1];
     if (next && !next.done && (next.w === '' || next.w == null)) next.w = w;
+    var cur = S.current;
+    if (k === 0 || !ex.sets.some(function (q, j) { return j !== k && q.done; })) {
+      if (cur.lastExEnd) { s.gapPrev = Math.round((ts(s.at) - ts(cur.lastExEnd)) / 1000); cur.lastExEnd = null; }
+    }
+    if (exDone(ex)) { stopRest(); cur.lastExEnd = s.at; }
     save();
-    startRest(ex, s);
+    if (!exDone(ex)) startRest(ex, s);
     if (exDone(ex)) {
       var b = S.current.blocks[bi];
       var nx = b.exercises.findIndex(function (e) { return !exDone(e); });
@@ -913,6 +1219,7 @@
     }
     var ne = makeEx(newEx, old.sets.length, S.current.ctxKey, S.current.loc, new Date());
     ne.note = old.note; ne.swappedFrom = old.name;
+    ne.slotId = old.slotId; ne.origExId = old.origExId || old.exId;
     b.exercises[ei] = ne;
     ui.openEx = bi + '-' + ei;
     save(); closeSheet(); render();
@@ -962,7 +1269,7 @@
     var left = Object.keys(D.MUSCLE_CFG).filter(function (m) { return (done[m] || 0) < S.settings.muscleCfg[m].target && s.exercises.some(function (e) { return e.muscle === m; }); });
     left.forEach(function (m) { improve.push(esc(D.MUSCLE_LABEL[m]) + ': ' + (done[m] || 0) + ' of ' + S.settings.muscleCfg[m].target + ' weekly sets so far.'); });
 
-    var h = topBar(s.type + ' summary', '#/home', 'Home');
+    var h = topBar(s.type + ' summary', '#/progress', 'Progress');
     h += '<p class="mute">' + esc(fmtDate(s.date)) + ', ' + esc(fmtTime(s.date)) + ' · ' + esc(s.loc === 'garage' ? 'Garage' : 'Gym') + ' · ' + esc(BUCKET[s.bucket] || '') + ', ' + esc((FED[s.fed] || '').toLowerCase()) + '</p>';
     h += '<div class="section stat-row"><div class="stat"><div class="v">' + totalSets + '</div><div class="k">sets</div></div><div class="stat"><div class="v">' + Math.round(vol).toLocaleString('en-US') + '</div><div class="k">lb moved</div></div><div class="stat"><div class="v">' + (mins != null ? mins : '–') + '</div><div class="k">min</div></div></div>';
     if (s.blockOrder && s.blockOrder.length) {
@@ -981,7 +1288,7 @@
   }
 
   function vSettings() {
-    var h = topBar('Settings', '#/home', 'Home');
+    var h = pageHead('Settings');
     h += '<div class="section"><h2>Weekly sets per muscle</h2><p class="mute small" style="margin-bottom:10px">Target is hard sets per week. Max is the most in one session. Min is the fewest.</p><div class="list">';
     h += '<div class="cfg"><span></span><span class="h">Target</span><span class="h">Max</span><span class="h">Min</span></div>';
     Object.keys(D.MUSCLE_CFG).forEach(function (m) {
@@ -1056,12 +1363,23 @@
       case 'exmenu':
         openSheet('<h3>' + esc(ex.name) + '</h3>' +
           '<button class="opt" data-act="swap" data-b="' + bi + '" data-e="' + ei + '"><span>Swap exercise</span><span class="sm">Unavailable or not working</span></button>' +
+          (ei > 0 ? '<button class="opt" data-act="ex-up" data-b="' + bi + '" data-e="' + ei + '"><span>Move up</span></button>' : '') +
+          (ei < S.current.blocks[bi].exercises.length - 1 ? '<button class="opt" data-act="ex-down" data-b="' + bi + '" data-e="' + ei + '"><span>Move down</span></button>' : '') +
           '<button class="opt" data-act="add-set" data-b="' + bi + '" data-e="' + ei + '"><span>Add a set</span></button>' +
           '<button class="opt" data-act="rm-set" data-b="' + bi + '" data-e="' + ei + '"><span>Remove last set</span></button>' +
           '<button class="opt" data-act="skip" data-b="' + bi + '" data-e="' + ei + '"><span>' + (ex.skipped ? 'Restore exercise' : 'Skip exercise') + '</span></button>' +
           '<div class="row-btns"><button class="btn secondary slim" data-act="close-sheet">Close</button></div>');
         break;
       case 'swap': swapSheet(bi, ei); break;
+      case 'ex-up': case 'ex-down': {
+        var arr = S.current.blocks[bi].exercises, to = a === 'ex-up' ? ei - 1 : ei + 1;
+        if (to >= 0 && to < arr.length) { arr.splice(to, 0, arr.splice(ei, 1)[0]); ui.openEx = bi + '-' + to; save(); }
+        closeSheet(); render(); break;
+      }
+      case 'save-tpl': saveSessionToTemplate(); render(); break;
+      case 'st-add': { var sid2 = el.dataset.id; if (ui.start.adds[sid2]) delete ui.start.adds[sid2]; else ui.start.adds[sid2] = Number(el.dataset.v); render(); break; }
+      case 'tpl-make': case 'tpl-reset': case 'sl-inc': case 'sl-dec': case 'sl-up': case 'sl-del': case 'blk-up': case 'blk-del': case 'blk-add': case 'blk-ren': case 'sl-swap': case 'sl-add': case 'tpl-all': case 'tpl-pick':
+        tplAction(a, el); break;
       case 'add-ex': addSheet(bi); break;
       case 'more-filter': ui.moreFilter = el.dataset.v; addSheet(bi); break;
       case 'add-pick': {
@@ -1174,7 +1492,7 @@
   document.addEventListener('touchend', function (e) {
     if (swipeX == null) return;
     var dx = e.changedTouches[0].clientX - swipeX; swipeX = null;
-    if (Math.abs(dx) > 50) { ui.bodySlide = bodySlide() + (dx < 0 ? 1 : 2); render(); }
+    if (Math.abs(dx) > 50) { ui.bodySlide = bodySlide() + 1; render(); }
   }, { passive: true });
   document.addEventListener('click', onClick);
   document.addEventListener('input', onInput);
